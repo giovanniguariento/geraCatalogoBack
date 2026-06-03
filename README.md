@@ -69,3 +69,31 @@ Comando de start já configurado: `npm start`.
 | PUT    | `/api/catalogs/:id/reorder` | Reordena páginas (`{ order: [ids] }`) |
 | PUT    | `/api/pages/:id` | Edita página |
 | DELETE | `/api/pages/:id` | Exclui página |
+
+---
+
+## Integração com o Bling (opcional)
+
+Totalmente opcional e degradável: sem as credenciais, a busca do Bling fica desativada e o sistema funciona no modo manual normalmente.
+
+**Para ativar:**
+
+1. Crie um aplicativo em https://developer.bling.com.br (escopo de **Produtos – leitura**).
+2. Cadastre a **URL de redirecionamento** do app como:
+   `https://SEU-BACKEND.up.railway.app/bling/callback`
+3. No Railway, defina as variáveis:
+   - `BLING_CLIENT_ID`
+   - `BLING_CLIENT_SECRET`
+   - *(opcional)* `BLING_PRICE_DISCOUNT` (padrão `0.20` = −20%)
+4. Faça o redeploy e acesse **uma vez** no navegador:
+   `https://SEU-BACKEND.up.railway.app/bling/connect`
+   Você loga no Bling, autoriza, e os tokens ficam salvos no banco (sobrevivem a redeploys).
+
+**Endpoints da integração:**
+| Método | Rota | Uso |
+|--------|------|-----|
+| GET | `/bling/connect` | Inicia a autorização (navegador) |
+| GET | `/bling/callback` | Retorno do OAuth (navegador) |
+| GET | `/api/bling/status` | `{ configured, connected }` |
+| GET | `/api/bling/produtos?q=` | Busca produtos por texto |
+| GET | `/api/bling/produtos/:id` | Detalhes (preço −20%, descrição, dimensões, peso) |
