@@ -132,19 +132,57 @@ async function blingGet(path) {
   } catch (e) { console.error('[bling] GET', path, e.message); return null; }
 }
 
+// ---- Busca de produtos: cache + filtro "contém" local ----
+// O filtro `nome` do Bling casa pelo começo/exato, então baixamos a lista
+// de produtos, guardamos em cache e filtramos por "contém" (sem acento/caixa).
+const CACHE_TTL = parseInt(process.env.BLING_CACHE_TTL_MS, 10) || (10 * 60 * 1000); // 10 min
+const MAX_PAGES = parseInt(process.env.BLING_MAX_PAGES, 10) || 50; // até 50 x 100 = 5000 produtos
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const norm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+
+let productCache = { items: [], at: 0, loading: null };
+
+async function fetchAllProducts() {
+  const criterio = process.env.BLING_PRODUCT_CRITERIO || '5';
+  const all = [];
+  for (let pagina = 1; pagina <= MAX_PAGES; pagina++) {
+    const params = new URLSearchParams({ criterio, pagina: String(pagina), limite: '100' });
+    const j = await blingGet('/produtos?' + params.toString());
+    const arr = j && Array.isArray(j.data) ? j.data : [];
+    if (!arr.length) break;
+    for (const p of arr) all.push({ id: p.id, nome: p.nome || '', codigo: p.codigo || '', preco: Number(p.preco) || 0 });
+    if (arr.length < 100) break; // última página
+    await sleep(250); // respeita o limite de requisições do Bling
+  }
+  return all;
+}
+
+async function getProductIndex() {
+  const fresh = productCache.items.length && (Date.now() - productCache.at < CACHE_TTL);
+  if (fresh) return productCache.items;
+  if (productCache.loading) return productCache.loading; // dedupe de chamadas concorrentes
+  productCache.loading = (async () => {
+    try {
+      const items = await fetchAllProducts();
+      if (items.length) { productCache.items = items; productCache.at = Date.now(); }
+      return productCache.items;
+    } finally { productCache.loading = null; }
+  })();
+  return productCache.loading;
+}
+
+// Aquece o cache em segundo plano (chamado quando o frontend consulta o status)
+export function warmProductCache() {
+  if (!blingConfigured()) return;
+  getProductIndex().catch(() => {});
+}
+
 export async function searchProducts(q) {
   if (!q || !q.trim()) return [];
-  // Bling /produtos filtra por nome (parcial). criterio: 1=últimos,2=ativos,3=inativos,4=excluídos,5=todos
-  const criterio = process.env.BLING_PRODUCT_CRITERIO || '5';
-  const params = new URLSearchParams({ nome: q.trim(), criterio, pagina: '1', limite: '20' });
-  const j = await blingGet('/produtos?' + params.toString());
-  const arr = j && Array.isArray(j.data) ? j.data : [];
-  return arr.map((p) => ({
-    id: p.id,
-    nome: p.nome || '',
-    codigo: p.codigo || '',
-    preco: Number(p.preco) || 0,
-  }));
+  const nq = norm(q);
+  const index = await getProductIndex();
+  const matches = index.filter((p) => norm(p.nome).includes(nq) || norm(p.codigo).includes(nq));
+  return matches.slice(0, 20);
 }
 
 const stripHtml = (s) => String(s || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
