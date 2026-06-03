@@ -188,6 +188,50 @@ export async function searchProducts(q) {
 const stripHtml = (s) => String(s || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
 const commaNum = (n) => String(n).replace('.', ',');
 
+// Procura uma URL de imagem na estrutura do produto (cobre formatos conhecidos
+// e faz uma varredura defensiva caso o caminho seja diferente).
+function looksLikeImageUrl(s) {
+  return typeof s === 'string' && /^https?:\/\//i.test(s) && /\.(jpe?g|png|webp|gif)(\?|$)/i.test(s);
+}
+function extractImageUrl(d) {
+  const m = d.midia || d.midias || {};
+  const imgs = m.imagens || {};
+  const candidates = [
+    imgs.externas, imgs.internas, m.imagens, d.imagens,
+  ].filter(Array.isArray).flat();
+  for (const c of candidates) {
+    const link = c && (c.link || c.url || c.linkMiniatura);
+    if (looksLikeImageUrl(link)) return link;
+    if (looksLikeImageUrl(c)) return c;
+  }
+  if (looksLikeImageUrl(d.imagemURL)) return d.imagemURL;
+  if (looksLikeImageUrl(d.imagem)) return d.imagem;
+  // varredura defensiva: primeira string que pareça URL de imagem
+  let found = null;
+  const scan = (o, depth = 0) => {
+    if (found || depth > 4 || !o || typeof o !== 'object') return;
+    for (const v of Object.values(o)) {
+      if (found) return;
+      if (looksLikeImageUrl(v)) { found = v; return; }
+      if (v && typeof v === 'object') scan(v, depth + 1);
+    }
+  };
+  scan(d);
+  return found;
+}
+
+async function fetchImageAsDataUrl(url) {
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const ct = (res.headers.get('content-type') || 'image/jpeg').split(';')[0];
+    if (!ct.startsWith('image/')) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > 5 * 1024 * 1024) return null; // ignora imagens gigantes
+    return `data:${ct};base64,${buf.toString('base64')}`;
+  } catch (e) { console.error('[bling] imagem', e.message); return null; }
+}
+
 export async function getProductDetail(id) {
   const j = await blingGet('/produtos/' + encodeURIComponent(id));
   const d = j && j.data ? j.data : null;
@@ -206,6 +250,11 @@ export async function getProductDetail(id) {
   const peso = d.pesoBruto != null && Number(d.pesoBruto) !== 0 ? d.pesoBruto
             : (d.pesoLiquido != null && Number(d.pesoLiquido) !== 0 ? d.pesoLiquido : null);
 
+  // Imagem: baixa no servidor (evita CORS) e devolve como data URL
+  let image = null;
+  const imgUrl = extractImageUrl(d);
+  if (imgUrl) image = await fetchImageAsDataUrl(imgUrl);
+
   return {
     id: d.id,
     nome: d.nome || '',
@@ -214,5 +263,6 @@ export async function getProductDetail(id) {
     description: stripHtml(d.descricaoCurta || d.descricaoComplementar || d.descricao || ''),
     dimensions: dimStr,
     weight: peso != null ? commaNum(peso) + ' kg' : '',
+    image,
   };
 }
