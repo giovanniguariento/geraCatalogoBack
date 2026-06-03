@@ -134,7 +134,9 @@ async function blingGet(path) {
 
 export async function searchProducts(q) {
   if (!q || !q.trim()) return [];
-  const params = new URLSearchParams({ pesquisa: q.trim(), pagina: '1', limite: '10' });
+  // Bling /produtos filtra por nome (parcial). criterio: 1=últimos,2=ativos,3=inativos,4=excluídos,5=todos
+  const criterio = process.env.BLING_PRODUCT_CRITERIO || '5';
+  const params = new URLSearchParams({ nome: q.trim(), criterio, pagina: '1', limite: '20' });
   const j = await blingGet('/produtos?' + params.toString());
   const arr = j && Array.isArray(j.data) ? j.data : [];
   return arr.map((p) => ({
