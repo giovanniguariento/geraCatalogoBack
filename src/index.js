@@ -4,6 +4,7 @@ import 'dotenv/config';
 import { initDb } from './db.js';
 import catalogs from './routes/catalogs.js';
 import pages from './routes/pages.js';
+import { oauthRouter, dataRouter as blingData } from './routes/bling.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -26,7 +27,12 @@ app.use('/api', (req, res, next) => {
 app.get('/', (_req, res) => res.json({ name: 'Boreal3D Catálogos API', status: 'ok' }));
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+// OAuth do Bling é visitado no navegador (Bling redireciona pra cá),
+// então fica FORA de /api e não passa pela trava de chave de API.
+app.use('/bling', oauthRouter);
+
 app.use('/api/catalogs', catalogs);
+app.use('/api/bling', blingData); // status + busca de produtos (usado pelo frontend)
 app.use('/api', pages); // /api/pages/:id
 
 app.use((err, _req, res, _next) => {

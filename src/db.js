@@ -42,7 +42,32 @@ export async function initDb() {
     );
   `);
   await pool.query(`CREATE INDEX IF NOT EXISTS idx_pages_catalog ON pages(catalog_id);`);
+  // Armazenamento chave/valor (ex.: tokens do Bling). Persiste entre deploys.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_config (
+      key   TEXT PRIMARY KEY,
+      value TEXT
+    );
+  `);
   console.log('[db] tabelas prontas.');
+}
+
+// Armazenamento simples chave/valor
+export async function getConfig(key) {
+  try {
+    const q = await pool.query(`SELECT value FROM app_config WHERE key=$1`, [key]);
+    return q.rowCount ? q.rows[0].value : null;
+  } catch (e) { console.error('[db] getConfig', e.message); return null; }
+}
+export async function setConfig(key, value) {
+  try {
+    await pool.query(
+      `INSERT INTO app_config (key, value) VALUES ($1,$2)
+       ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`,
+      [key, value]
+    );
+    return true;
+  } catch (e) { console.error('[db] setConfig', e.message); return false; }
 }
 
 // Helpers de mapeamento (snake_case -> camelCase)
