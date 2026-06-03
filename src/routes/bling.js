@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import {
   blingConfigured, isConnected, buildAuthUrl, checkState, exchangeCode,
-  searchProducts, getProductDetail, rememberReturnUrl, resolveReturnUrl,
+  searchProducts, getProductDetail, rememberReturnUrl, resolveReturnUrl, warmProductCache,
 } from '../bling.js';
 
 // Páginas HTML simples (fallback quando não há frontend pra onde voltar)
@@ -61,7 +61,9 @@ oauthRouter.get('/callback', async (req, res) => {
 export const dataRouter = Router();
 
 dataRouter.get('/status', async (_req, res) => {
-  res.json({ configured: blingConfigured(), connected: await isConnected() });
+  const connected = await isConnected();
+  if (connected) warmProductCache(); // aquece o cache em segundo plano
+  res.json({ configured: blingConfigured(), connected });
 });
 
 dataRouter.get('/produtos', async (req, res) => {
