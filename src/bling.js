@@ -188,32 +188,45 @@ export async function searchProducts(q) {
 const stripHtml = (s) => String(s || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
 const commaNum = (n) => String(n).replace('.', ',');
 
-// Procura uma URL de imagem na estrutura do produto (cobre formatos conhecidos
-// e faz uma varredura defensiva caso o caminho seja diferente).
-function looksLikeImageUrl(s) {
-  return typeof s === 'string' && /^https?:\/\//i.test(s) && /\.(jpe?g|png|webp|gif)(\?|$)/i.test(s);
+// Procura uma URL de imagem na estrutura do produto. Tolerante a vários formatos.
+const isHttp = (s) => typeof s === 'string' && /^https?:\/\//i.test(s);
+function pickLink(o) {
+  if (isHttp(o)) return o;
+  if (o && typeof o === 'object') return o.link || o.linkMiniatura || o.url || o.imageUrl || null;
+  return null;
 }
 function extractImageUrl(d) {
   const m = d.midia || d.midias || {};
-  const imgs = m.imagens || {};
-  const candidates = [
-    imgs.externas, imgs.internas, m.imagens, d.imagens,
-  ].filter(Array.isArray).flat();
-  for (const c of candidates) {
-    const link = c && (c.link || c.url || c.linkMiniatura);
-    if (looksLikeImageUrl(link)) return link;
-    if (looksLikeImageUrl(c)) return c;
+  const imgs = m.imagens || d.imagens || {};
+  const groups = [];
+  if (Array.isArray(imgs)) groups.push(imgs);
+  else {
+    if (Array.isArray(imgs.internas)) groups.push(imgs.internas);
+    if (Array.isArray(imgs.externas)) groups.push(imgs.externas);
   }
-  if (looksLikeImageUrl(d.imagemURL)) return d.imagemURL;
-  if (looksLikeImageUrl(d.imagem)) return d.imagem;
-  // varredura defensiva: primeira string que pareça URL de imagem
+  for (const g of groups) {
+    for (const item of g) {
+      const link = pickLink(item);
+      if (isHttp(link)) return link; // dentro de midia.imagens: aceita qualquer link http
+    }
+  }
+  for (const k of ['imagemURL', 'imagem', 'urlImagem', 'linkImagem']) {
+    if (isHttp(d[k])) return d[k];
+  }
+  // varredura defensiva: URL sob chaves que pareçam imagem (evita vídeo / link da loja)
   let found = null;
-  const scan = (o, depth = 0) => {
-    if (found || depth > 4 || !o || typeof o !== 'object') return;
-    for (const v of Object.values(o)) {
+  const scan = (o, keyHint = '', depth = 0) => {
+    if (found || depth > 5 || !o || typeof o !== 'object') return;
+    for (const [key, v] of Object.entries(o)) {
       if (found) return;
-      if (looksLikeImageUrl(v)) { found = v; return; }
-      if (v && typeof v === 'object') scan(v, depth + 1);
+      const kl = (keyHint + ' ' + key).toLowerCase();
+      if (isHttp(v)) {
+        const looksImg = /imag|foto|thumb|midia|media/.test(kl) || /\.(jpe?g|png|webp|gif)(\?|$)/i.test(v);
+        const isOther = /video|linkexterno|loja|site/.test(kl);
+        if (looksImg && !isOther) { found = v; return; }
+      } else if (v && typeof v === 'object') {
+        scan(v, key, depth + 1);
+      }
     }
   };
   scan(d);
@@ -223,11 +236,17 @@ function extractImageUrl(d) {
 async function fetchImageAsDataUrl(url) {
   try {
     const res = await fetch(url);
-    if (!res.ok) return null;
-    const ct = (res.headers.get('content-type') || 'image/jpeg').split(';')[0];
-    if (!ct.startsWith('image/')) return null;
+    if (!res.ok) { console.error('[bling] imagem HTTP', res.status, url); return null; }
+    let ct = (res.headers.get('content-type') || '').split(';')[0].trim();
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length > 5 * 1024 * 1024) return null; // ignora imagens gigantes
+    if (!ct.startsWith('image/')) {
+      // alguns servidores não mandam content-type de imagem; deduz pela URL
+      if (/\.png(\?|$)/i.test(url)) ct = 'image/png';
+      else if (/\.webp(\?|$)/i.test(url)) ct = 'image/webp';
+      else if (/\.gif(\?|$)/i.test(url)) ct = 'image/gif';
+      else ct = 'image/jpeg';
+    }
     return `data:${ct};base64,${buf.toString('base64')}`;
   } catch (e) { console.error('[bling] imagem', e.message); return null; }
 }
@@ -254,6 +273,12 @@ export async function getProductDetail(id) {
   let image = null;
   const imgUrl = extractImageUrl(d);
   if (imgUrl) image = await fetchImageAsDataUrl(imgUrl);
+  if (!image) {
+    // diagnóstico: ajuda a descobrir onde está a imagem nesse cadastro
+    console.log('[bling] sem imagem. urlEncontrada=', imgUrl,
+      '| midia=', JSON.stringify(d.midia || d.midias || null),
+      '| chaves=', Object.keys(d).join(','));
+  }
 
   return {
     id: d.id,
