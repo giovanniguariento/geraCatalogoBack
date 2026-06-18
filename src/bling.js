@@ -185,8 +185,43 @@ export async function searchProducts(q) {
   return matches.slice(0, 20);
 }
 
+// TEMPORÁRIO: amostra crua pra descobrir o formato real dos dados da conta.
+// Usado uma vez pra confirmar os nomes dos campos; depois pode ser removido.
+export async function discoverySample() {
+  const out = {};
+  // 1) Pedido de venda: lista (resumida) + detalhe (com itens)
+  const lista = await blingGet('/pedidos/vendas?' + new URLSearchParams({ pagina: '1', limite: '1' }));
+  out.pedido_lista = lista;
+  const pedidoId = lista && Array.isArray(lista.data) && lista.data[0] ? lista.data[0].id : null;
+  out.pedido_detalhe = pedidoId ? await blingGet('/pedidos/vendas/' + pedidoId) : null;
+
+  // 2) Produto detalhado (pra ver se o fornecedor vem aqui)
+  const prod = await blingGet('/produtos?' + new URLSearchParams({ criterio: '5', pagina: '1', limite: '1' }));
+  const prodId = prod && Array.isArray(prod.data) && prod.data[0] ? prod.data[0].id : null;
+  out.produto_detalhe = prodId ? await blingGet('/produtos/' + prodId) : null;
+
+  // 3) Recurso de produto-fornecedor (testa o caminho mais provável)
+  out.produtos_fornecedores = await blingGet('/produtos/fornecedores?' + new URLSearchParams({ pagina: '1', limite: '3' }));
+
+  return out;
+}
+
 const stripHtml = (s) => String(s || '').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
 const commaNum = (n) => String(n).replace('.', ',');
+
+// Traduz a unidade de medida das dimensões. O Bling pode mandar um código
+// numérico (ex.: 1) ou um rótulo. Padrão cm (padrão do Bling), configurável.
+function dimUnit(u) {
+  const s = String(u == null ? '' : u).trim();
+  if (/[a-zA-Z]/.test(s)) {
+    const low = s.toLowerCase();
+    if (low.includes('mil') || low === 'mm') return 'mm';
+    if (low.includes('cent') || low === 'cm') return 'cm';
+    if (low.includes('met') || low === 'm') return 'm';
+    return s;
+  }
+  return process.env.BLING_DIM_UNIT || 'cm';
+}
 
 // Procura uma URL de imagem na estrutura do produto. Tolerante a vários formatos.
 const isHttp = (s) => typeof s === 'string' && /^https?:\/\//i.test(s);
@@ -263,8 +298,7 @@ export async function getProductDetail(id) {
   const dimParts = [dim.largura, dim.altura, dim.profundidade]
     .filter((v) => v != null && v !== '' && Number(v) !== 0)
     .map((v) => commaNum(v));
-  const unidade = dim.unidadeMedida ? ' ' + dim.unidadeMedida : '';
-  const dimStr = dimParts.length ? dimParts.join(' × ') + unidade : '';
+  const dimStr = dimParts.length ? dimParts.join(' × ') + ' ' + dimUnit(dim.unidadeMedida) : '';
 
   const peso = d.pesoBruto != null && Number(d.pesoBruto) !== 0 ? d.pesoBruto
             : (d.pesoLiquido != null && Number(d.pesoLiquido) !== 0 ? d.pesoLiquido : null);
