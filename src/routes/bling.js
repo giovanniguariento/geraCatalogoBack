@@ -2,7 +2,7 @@ import { Router } from 'express';
 import {
   blingConfigured, isConnected, buildAuthUrl, checkState, exchangeCode,
   searchProducts, getProductDetail, rememberReturnUrl, resolveReturnUrl, warmProductCache,
-  discoverySample,
+  discoverySample, blingDiagnostics,
 } from '../bling.js';
 
 // Páginas HTML simples (fallback quando não há frontend pra onde voltar)
@@ -60,6 +60,17 @@ oauthRouter.get('/callback', async (req, res) => {
 
 // ---- Rotas chamadas pelo FRONTEND (sob /api) ----
 export const dataRouter = Router();
+
+// TEMPORÁRIO: diagnóstico, aberto no navegador.
+oauthRouter.get('/debug/diagnostico', async (_req, res) => {
+  if (!blingConfigured()) return res.status(400).json({ error: 'Bling não configurado (faltam BLING_CLIENT_ID/SECRET)' });
+  try {
+    const data = await blingDiagnostics();
+    res.type('application/json').send(JSON.stringify(data, null, 2));
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
 
 // TEMPORÁRIO: amostra de descoberta, aberta no navegador.
 oauthRouter.get('/debug/amostra', async (_req, res) => {

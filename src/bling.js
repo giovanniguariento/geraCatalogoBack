@@ -185,6 +185,27 @@ export async function searchProducts(q) {
   return matches.slice(0, 20);
 }
 
+// TEMPORÁRIO: diagnóstico do estado da conexão (status HTTP real de cada rota).
+export async function blingDiagnostics() {
+  const out = { configured: blingConfigured() };
+  const t = await loadTokens();
+  out.temRefreshToken = !!(t && t.refresh_token);
+  out.accessTokenExpiraEm = t && t.expires_at ? new Date(t.expires_at).toISOString() : null;
+  const at = await getAccessToken();
+  out.conseguiuAccessToken = !!at;
+  async function testar(path) {
+    if (!at) return { erro: 'sem access token válido' };
+    try {
+      const r = await fetch(API_URL + path, { headers: { Authorization: 'Bearer ' + at, Accept: 'application/json' } });
+      const body = await r.text();
+      return { status: r.status, corpo: body.slice(0, 400) };
+    } catch (e) { return { erro: String(e.message || e) }; }
+  }
+  out.teste_produtos = await testar('/produtos?limite=1');
+  out.teste_pedidos = await testar('/pedidos/vendas?limite=1');
+  return out;
+}
+
 // TEMPORÁRIO: amostra crua pra descobrir o formato real dos dados da conta.
 // Usado uma vez pra confirmar os nomes dos campos; depois pode ser removido.
 export async function discoverySample() {
