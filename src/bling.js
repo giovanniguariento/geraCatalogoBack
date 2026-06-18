@@ -123,23 +123,27 @@ export async function isConnected() {
 async function blingGet(path) {
   let at = await getAccessToken();
   if (!at) return null;
+  const doFetch = (token) => fetch(API_URL + path, {
+    headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' },
+  });
   try {
-    let res = await fetch(API_URL + path, {
-      headers: { 'Authorization': 'Bearer ' + at, 'Accept': 'application/json' },
-    });
+    let res = await doFetch(at);
     if (res.status === 401) {
       // token rejeitado pelo Bling: força renovação e tenta uma vez mais
       const t = await loadTokens();
       if (t && t.refresh_token) {
         try {
           const nt = await refreshTokens(t.refresh_token);
-          if (nt && nt.access_token) {
-            res = await fetch(API_URL + path, {
-              headers: { 'Authorization': 'Bearer ' + nt.access_token, 'Accept': 'application/json' },
-            });
-          }
+          if (nt && nt.access_token) { at = nt.access_token; res = await doFetch(at); }
         } catch (e) { console.error('[bling] refresh após 401 falhou:', e.message); }
       }
+    }
+    // 429 (limite de 3 req/s): espera e tenta de novo
+    let tentativas = 0;
+    while (res.status === 429 && tentativas < 4) {
+      await sleep(1200);
+      res = await doFetch(at);
+      tentativas++;
     }
     if (!res.ok) { console.error('[bling] GET', path, res.status); return null; }
     return await res.json();
@@ -166,7 +170,7 @@ async function fetchAllProducts() {
     if (!arr.length) break;
     for (const p of arr) all.push({ id: p.id, nome: p.nome || '', codigo: p.codigo || '', preco: Number(p.preco) || 0 });
     if (arr.length < 100) break; // última página
-    await sleep(250); // respeita o limite de requisições do Bling
+    await sleep(400); // respeita o limite de ~3 req/s do Bling
   }
   return all;
 }
@@ -211,7 +215,13 @@ export async function blingDiagnostics() {
   async function call(path, token) {
     if (!token) return { erro: 'sem access token válido' };
     try {
-      const r = await fetch(API_URL + path, { headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' } });
+      let r = await fetch(API_URL + path, { headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' } });
+      let tentativas = 0;
+      while (r.status === 429 && tentativas < 4) {
+        await sleep(1500);
+        r = await fetch(API_URL + path, { headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' } });
+        tentativas++;
+      }
       const body = await r.text();
       return { status: r.status, corpo: body.slice(0, 300) };
     } catch (e) { return { erro: String(e.message || e) }; }
