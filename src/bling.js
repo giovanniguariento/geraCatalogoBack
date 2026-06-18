@@ -121,12 +121,26 @@ export async function isConnected() {
 
 // ---- Produtos ----
 async function blingGet(path) {
-  const at = await getAccessToken();
+  let at = await getAccessToken();
   if (!at) return null;
   try {
-    const res = await fetch(API_URL + path, {
+    let res = await fetch(API_URL + path, {
       headers: { 'Authorization': 'Bearer ' + at, 'Accept': 'application/json' },
     });
+    if (res.status === 401) {
+      // token rejeitado pelo Bling: força renovação e tenta uma vez mais
+      const t = await loadTokens();
+      if (t && t.refresh_token) {
+        try {
+          const nt = await refreshTokens(t.refresh_token);
+          if (nt && nt.access_token) {
+            res = await fetch(API_URL + path, {
+              headers: { 'Authorization': 'Bearer ' + nt.access_token, 'Accept': 'application/json' },
+            });
+          }
+        } catch (e) { console.error('[bling] refresh após 401 falhou:', e.message); }
+      }
+    }
     if (!res.ok) { console.error('[bling] GET', path, res.status); return null; }
     return await res.json();
   } catch (e) { console.error('[bling] GET', path, e.message); return null; }
@@ -191,18 +205,38 @@ export async function blingDiagnostics() {
   const t = await loadTokens();
   out.temRefreshToken = !!(t && t.refresh_token);
   out.accessTokenExpiraEm = t && t.expires_at ? new Date(t.expires_at).toISOString() : null;
-  const at = await getAccessToken();
+  let at = await getAccessToken();
   out.conseguiuAccessToken = !!at;
-  async function testar(path) {
-    if (!at) return { erro: 'sem access token válido' };
+
+  async function call(path, token) {
+    if (!token) return { erro: 'sem access token válido' };
     try {
-      const r = await fetch(API_URL + path, { headers: { Authorization: 'Bearer ' + at, Accept: 'application/json' } });
+      const r = await fetch(API_URL + path, { headers: { Authorization: 'Bearer ' + token, Accept: 'application/json' } });
       const body = await r.text();
-      return { status: r.status, corpo: body.slice(0, 400) };
+      return { status: r.status, corpo: body.slice(0, 300) };
     } catch (e) { return { erro: String(e.message || e) }; }
   }
-  out.teste_produtos = await testar('/produtos?limite=1');
-  out.teste_pedidos = await testar('/pedidos/vendas?limite=1');
+
+  out.teste_produtos = await call('/produtos?limite=1', at);
+
+  // Se deu 401, tenta renovar e re-testar (revela se basta renovar ou precisa reconectar)
+  if (out.teste_produtos && out.teste_produtos.status === 401 && t && t.refresh_token) {
+    try {
+      const nt = await refreshTokens(t.refresh_token);
+      if (nt && nt.access_token) {
+        out.renovacao_apos_401 = 'sucesso';
+        at = nt.access_token;
+        out.teste_produtos_apos_renovar = await call('/produtos?limite=1', at);
+        out.teste_pedidos_apos_renovar = await call('/pedidos/vendas?limite=1', at);
+      } else {
+        out.renovacao_apos_401 = 'sem token na resposta';
+      }
+    } catch (e) {
+      out.renovacao_apos_401 = 'FALHOU: ' + String(e.message || e);
+    }
+  } else {
+    out.teste_pedidos = await call('/pedidos/vendas?limite=1', at);
+  }
   return out;
 }
 
