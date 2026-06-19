@@ -120,12 +120,23 @@ export async function isConnected() {
 }
 
 // ---- Produtos ----
+let _lastBlingReq = 0;
+const _MIN_GAP = 360; // ms entre chamadas ao Bling (~2.7/s, abaixo do limite de 3/s)
+async function paceGate() {
+  const wait = _lastBlingReq + _MIN_GAP - Date.now();
+  if (wait > 0) await sleep(wait);
+  _lastBlingReq = Date.now();
+}
+
 async function blingGet(path) {
   let at = await getAccessToken();
   if (!at) return null;
-  const doFetch = (token) => fetch(API_URL + path, {
-    headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' },
-  });
+  const doFetch = async (token) => {
+    await paceGate();
+    return fetch(API_URL + path, {
+      headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' },
+    });
+  };
   try {
     let res = await doFetch(at);
     if (res.status === 401) {
@@ -170,7 +181,6 @@ async function fetchAllProducts() {
     if (!arr.length) break;
     for (const p of arr) all.push({ id: p.id, nome: p.nome || '', codigo: p.codigo || '', preco: Number(p.preco) || 0 });
     if (arr.length < 100) break; // última página
-    await sleep(400); // respeita o limite de ~3 req/s do Bling
   }
   return all;
 }
@@ -311,7 +321,23 @@ async function getProductInfo(id) {
   return v;
 }
 
-export async function weightSoldBySupplier({ ano, mes, fornecedor }) {
+// Cache de itens de pedido (pedidos fechados não mudam) — acelera reexecuções.
+const orderItemsCache = new Map();
+const ORDER_TTL = 60 * 60 * 1000;
+async function getOrderItems(id) {
+  const c = orderItemsCache.get(id);
+  if (c && Date.now() - c.at < ORDER_TTL) return c.itens;
+  const j = await blingGet('/pedidos/vendas/' + id);
+  const raw = j && j.data && Array.isArray(j.data.itens) ? j.data.itens : [];
+  const itens = raw
+    .map((it) => ({ pid: it.produto && it.produto.id, qtd: Number(it.quantidade) || 0 }))
+    .filter((x) => x.pid);
+  orderItemsCache.set(id, { itens, at: Date.now() });
+  return itens;
+}
+
+export async function weightSoldBySupplier({ ano, mes, fornecedor, onProgress }) {
+  const report = (p) => { if (onProgress) onProgress(p); };
   const mm = String(mes).padStart(2, '0');
   const ultimoDia = new Date(Number(ano), Number(mes), 0).getDate();
   const dataInicial = `${ano}-${mm}-01`;
@@ -319,8 +345,9 @@ export async function weightSoldBySupplier({ ano, mes, fornecedor }) {
   const alvo = norm(fornecedor);
 
   // 1) Coletar todos os pedidos do mês (lista paginada)
+  report({ fase: 'listando', totalPedidos: 0, processados: 0 });
   const pedidos = [];
-  const MAX_PAG = 60; // até 6000 pedidos
+  const MAX_PAG = 80; // até 8000 pedidos
   for (let pagina = 1; pagina <= MAX_PAG; pagina++) {
     const params = new URLSearchParams({ dataInicial, dataFinal, pagina: String(pagina), limite: '100' });
     const j = await blingGet('/pedidos/vendas?' + params.toString());
@@ -328,30 +355,27 @@ export async function weightSoldBySupplier({ ano, mes, fornecedor }) {
     if (!arr.length) break;
     for (const p of arr) pedidos.push(p.id);
     if (arr.length < 100) break;
-    await sleep(400);
   }
 
   // 2) Para cada pedido, ler itens; enriquecer produto; filtrar fornecedor; somar
-  let totalKg = 0, totalItens = 0, produtosSemPeso = 0;
+  report({ fase: 'processando', totalPedidos: pedidos.length, processados: 0 });
+  let totalKg = 0, totalItens = 0, itensSemPeso = 0, processados = 0;
   const porProduto = new Map();
   for (const pedidoId of pedidos) {
-    const j = await blingGet('/pedidos/vendas/' + pedidoId);
-    const itens = j && j.data && Array.isArray(j.data.itens) ? j.data.itens : [];
+    const itens = await getOrderItems(pedidoId);
     for (const it of itens) {
-      const pid = it.produto && it.produto.id;
-      if (!pid) continue;
-      const info = await getProductInfo(pid);
+      const info = await getProductInfo(it.pid);
       if (!info) continue;
       if (alvo && !norm(info.fornecedor).includes(alvo)) continue; // filtra pelo fornecedor
-      const qtd = Number(it.quantidade) || 0;
-      const kg = qtd * info.pesoLiquido;
-      if (info.pesoLiquido === 0) produtosSemPeso += 1;
-      totalKg += kg; totalItens += qtd;
-      const cur = porProduto.get(pid) || { nome: info.nome, codigo: info.codigo, qtd: 0, pesoUnit: info.pesoLiquido, kg: 0 };
-      cur.qtd += qtd; cur.kg += kg;
-      porProduto.set(pid, cur);
+      const kg = it.qtd * info.pesoLiquido;
+      if (info.pesoLiquido === 0) itensSemPeso += 1;
+      totalKg += kg; totalItens += it.qtd;
+      const cur = porProduto.get(it.pid) || { nome: info.nome, codigo: info.codigo, qtd: 0, pesoUnit: info.pesoLiquido, kg: 0 };
+      cur.qtd += it.qtd; cur.kg += kg;
+      porProduto.set(it.pid, cur);
     }
-    await sleep(400);
+    processados += 1;
+    report({ fase: 'processando', totalPedidos: pedidos.length, processados });
   }
 
   const produtos = [...porProduto.values()]
@@ -363,9 +387,27 @@ export async function weightSoldBySupplier({ ano, mes, fornecedor }) {
     pedidosNoPeriodo: pedidos.length,
     itensContabilizados: totalItens,
     totalKg: Math.round(totalKg * 1000) / 1000,
-    alertaItensSemPeso: produtosSemPeso,
+    alertaItensSemPeso: itensSemPeso,
     produtos,
   };
+}
+
+// ---- Jobs em segundo plano para o relatório ----
+const reportJobs = new Map();
+let _jobSeq = 0;
+export function startWeightReportJob({ ano, mes, fornecedor }) {
+  const jobId = Date.now().toString(36) + '-' + (++_jobSeq);
+  const job = { status: 'running', progress: { fase: 'iniciando', totalPedidos: 0, processados: 0 }, result: null, error: null, startedAt: Date.now() };
+  reportJobs.set(jobId, job);
+  // limpa jobs antigos (> 30 min)
+  for (const [k, v] of reportJobs) if (Date.now() - v.startedAt > 30 * 60 * 1000) reportJobs.delete(k);
+  weightSoldBySupplier({ ano, mes, fornecedor, onProgress: (p) => { job.progress = p; } })
+    .then((r) => { job.result = r; job.status = 'done'; })
+    .catch((e) => { job.error = String(e.message || e); job.status = 'error'; });
+  return jobId;
+}
+export function getReportJob(jobId) {
+  return reportJobs.get(jobId) || null;
 }
 
 // TEMPORÁRIO: diagnóstico do estado da conexão (status HTTP real de cada rota).

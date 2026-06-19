@@ -2,7 +2,7 @@ import { Router } from 'express';
 import {
   blingConfigured, isConnected, buildAuthUrl, checkState, exchangeCode,
   searchProducts, getProductDetail, rememberReturnUrl, resolveReturnUrl, warmProductCache,
-  discoverySample, blingDiagnostics, weightSoldBySupplier,
+  discoverySample, blingDiagnostics, startWeightReportJob, getReportJob,
 } from '../bling.js';
 
 // Páginas HTML simples (fallback quando não há frontend pra onde voltar)
@@ -102,17 +102,19 @@ dataRouter.get('/produtos/:id', async (req, res) => {
   res.json({ connected: true, produto });
 });
 
-// Relatório: peso líquido vendido por fornecedor, no mês
-dataRouter.get('/relatorio/peso-fornecedor', async (req, res) => {
+// Relatório: peso líquido vendido por fornecedor, no mês (em segundo plano)
+dataRouter.get('/relatorio/peso-fornecedor/iniciar', async (req, res) => {
   if (!(await isConnected())) return res.status(400).json({ error: 'Bling não conectado' });
   const { ano, mes, fornecedor } = req.query;
   if (!ano || !mes || !fornecedor) {
     return res.status(400).json({ error: 'Informe ano, mes e fornecedor' });
   }
-  try {
-    const r = await weightSoldBySupplier({ ano, mes, fornecedor: String(fornecedor) });
-    res.json(r);
-  } catch (e) {
-    res.status(500).json({ error: String(e.message || e) });
-  }
+  const jobId = startWeightReportJob({ ano, mes, fornecedor: String(fornecedor) });
+  res.json({ jobId });
+});
+
+dataRouter.get('/relatorio/peso-fornecedor/status', (req, res) => {
+  const job = getReportJob(String(req.query.jobId || ''));
+  if (!job) return res.status(404).json({ error: 'Job não encontrado (pode ter expirado). Recalcule.' });
+  res.json({ status: job.status, progress: job.progress, result: job.result, error: job.error });
 });
