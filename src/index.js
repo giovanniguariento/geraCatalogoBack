@@ -12,8 +12,12 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 // CORS: por padrão libera geral. Para restringir, defina FRONTEND_URL=https://seuapp.vercel.app
-const origin = process.env.FRONTEND_URL || true;
-app.use(cors({ origin }));
+const corsOptions = {
+  origin: process.env.FRONTEND_URL || true,
+  exposedHeaders: ['X-Label-Count', 'X-Label-Total', 'X-Label-Index', 'Content-Disposition'],
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions)); // garante resposta ao preflight em todas as rotas
 
 // imagens em base64 viajam no corpo JSON -> limite maior
 app.use(express.json({ limit: '25mb' }));
