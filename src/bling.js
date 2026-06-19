@@ -203,6 +203,171 @@ export async function searchProducts(q) {
   return matches.slice(0, 20);
 }
 
+// ---- Relatório: peso líquido vendido por fornecedor, por mês ----
+const produtoInfoCache = new Map(); // pid -> { pesoLiquido, fornecedorNome, nome }
+
+async function getProdutoInfo(pid) {
+  if (produtoInfoCache.has(pid)) return produtoInfoCache.get(pid);
+  const j = await blingGet('/produtos/' + pid);
+  const d = j && j.data ? j.data : null;
+  const info = d ? {
+    pesoLiquido: Number(d.pesoLiquido) || 0,
+    fornecedorNome: (d.fornecedor && d.fornecedor.contato && d.fornecedor.contato.nome) || '',
+    nome: d.nome || '',
+  } : { pesoLiquido: 0, fornecedorNome: '', nome: '' };
+  produtoInfoCache.set(pid, info);
+  return info;
+}
+
+export async function relatorioPesoFornecedor(mes, fornecedorNome, opts = {}) {
+  const paceMs = opts.paceMs || 340;
+  const maxPedidos = opts.maxPedidos || 3000;
+  if (!/^\d{4}-\d{2}$/.test(mes || '')) throw new Error('Mês inválido. Use o formato YYYY-MM (ex.: 2026-06).');
+  if (!fornecedorNome || !fornecedorNome.trim()) throw new Error('Informe o fornecedor.');
+
+  const [ano, m] = mes.split('-').map(Number);
+  const di = `${ano}-${String(m).padStart(2, '0')}-01`;
+  const ultimoDia = new Date(ano, m, 0).getDate();
+  const df = `${ano}-${String(m).padStart(2, '0')}-${String(ultimoDia).padStart(2, '0')}`;
+
+  // 1) Lista de pedidos do período (paginado)
+  const pedidos = [];
+  for (let pagina = 1; pagina <= 50; pagina++) {
+    const j = await blingGet('/pedidos/vendas?' + new URLSearchParams({ dataInicial: di, dataFinal: df, pagina: String(pagina), limite: '100' }));
+    const arr = j && Array.isArray(j.data) ? j.data : [];
+    pedidos.push(...arr);
+    if (arr.length < 100 || pedidos.length >= maxPedidos) break;
+    await sleep(paceMs);
+  }
+
+  // 2) Itens de cada pedido (detalhe)
+  const itens = [];
+  for (const p of pedidos) {
+    const d = await blingGet('/pedidos/vendas/' + p.id);
+    const lista = d && d.data && Array.isArray(d.data.itens) ? d.data.itens : [];
+    for (const it of lista) {
+      const pid = it.produto && it.produto.id;
+      if (pid) itens.push({ produtoId: pid, quantidade: Number(it.quantidade) || 0, descricao: it.descricao || '' });
+    }
+    await sleep(paceMs);
+  }
+
+  // 3) Info (peso + fornecedor) dos produtos distintos vendidos
+  const distintos = [...new Set(itens.map((i) => i.produtoId))];
+  for (const pid of distintos) {
+    if (!produtoInfoCache.has(pid)) { await getProdutoInfo(pid); await sleep(paceMs); }
+  }
+
+  // 4) Filtra pelo fornecedor e soma quantidade × pesoLiquido
+  const alvo = norm(fornecedorNome);
+  const agg = new Map();
+  let totalKg = 0;
+  for (const it of itens) {
+    const info = produtoInfoCache.get(it.produtoId);
+    if (!info) continue;
+    const fn = norm(info.fornecedorNome);
+    if (!fn || (fn !== alvo && !fn.includes(alvo))) continue;
+    const pesoTotal = it.quantidade * info.pesoLiquido;
+    totalKg += pesoTotal;
+    const cur = agg.get(it.produtoId) || {
+      produtoId: it.produtoId, descricao: info.nome || it.descricao,
+      fornecedor: info.fornecedorNome, quantidade: 0, pesoUnitarioKg: info.pesoLiquido, pesoTotalKg: 0,
+    };
+    cur.quantidade += it.quantidade;
+    cur.pesoTotalKg = Math.round((cur.pesoTotalKg + pesoTotal) * 1000) / 1000;
+    agg.set(it.produtoId, cur);
+  }
+
+  const detalhe = [...agg.values()].sort((a, b) => b.pesoTotalKg - a.pesoTotalKg);
+  const semPeso = detalhe.filter((d) => d.pesoUnitarioKg === 0).map((d) => d.descricao);
+
+  return {
+    mes, fornecedor: fornecedorNome,
+    periodo: { dataInicial: di, dataFinal: df },
+    totalPedidosNoPeriodo: pedidos.length,
+    produtosDoFornecedorVendidos: detalhe.length,
+    totalKg: Math.round(totalKg * 1000) / 1000,
+    alertaProdutosSemPesoCadastrado: semPeso,
+    detalhe,
+  };
+}
+
+// ---- Relatório: peso líquido vendido por fornecedor, no mês ----
+const prodInfoCache = new Map();
+const PROD_INFO_TTL = 24 * 60 * 60 * 1000;
+
+async function getProductInfo(id) {
+  const c = prodInfoCache.get(id);
+  if (c && Date.now() - c.at < PROD_INFO_TTL) return c.v;
+  const j = await blingGet('/produtos/' + id);
+  const d = j && j.data ? j.data : null;
+  const v = d ? {
+    nome: d.nome || '',
+    codigo: d.codigo || '',
+    fornecedor: (d.fornecedor && d.fornecedor.contato && d.fornecedor.contato.nome) || '',
+    pesoLiquido: Number(d.pesoLiquido) || 0,
+  } : null;
+  if (v) prodInfoCache.set(id, { v, at: Date.now() });
+  return v;
+}
+
+export async function weightSoldBySupplier({ ano, mes, fornecedor }) {
+  const mm = String(mes).padStart(2, '0');
+  const ultimoDia = new Date(Number(ano), Number(mes), 0).getDate();
+  const dataInicial = `${ano}-${mm}-01`;
+  const dataFinal = `${ano}-${mm}-${String(ultimoDia).padStart(2, '0')}`;
+  const alvo = norm(fornecedor);
+
+  // 1) Coletar todos os pedidos do mês (lista paginada)
+  const pedidos = [];
+  const MAX_PAG = 60; // até 6000 pedidos
+  for (let pagina = 1; pagina <= MAX_PAG; pagina++) {
+    const params = new URLSearchParams({ dataInicial, dataFinal, pagina: String(pagina), limite: '100' });
+    const j = await blingGet('/pedidos/vendas?' + params.toString());
+    const arr = j && Array.isArray(j.data) ? j.data : [];
+    if (!arr.length) break;
+    for (const p of arr) pedidos.push(p.id);
+    if (arr.length < 100) break;
+    await sleep(400);
+  }
+
+  // 2) Para cada pedido, ler itens; enriquecer produto; filtrar fornecedor; somar
+  let totalKg = 0, totalItens = 0, produtosSemPeso = 0;
+  const porProduto = new Map();
+  for (const pedidoId of pedidos) {
+    const j = await blingGet('/pedidos/vendas/' + pedidoId);
+    const itens = j && j.data && Array.isArray(j.data.itens) ? j.data.itens : [];
+    for (const it of itens) {
+      const pid = it.produto && it.produto.id;
+      if (!pid) continue;
+      const info = await getProductInfo(pid);
+      if (!info) continue;
+      if (alvo && !norm(info.fornecedor).includes(alvo)) continue; // filtra pelo fornecedor
+      const qtd = Number(it.quantidade) || 0;
+      const kg = qtd * info.pesoLiquido;
+      if (info.pesoLiquido === 0) produtosSemPeso += 1;
+      totalKg += kg; totalItens += qtd;
+      const cur = porProduto.get(pid) || { nome: info.nome, codigo: info.codigo, qtd: 0, pesoUnit: info.pesoLiquido, kg: 0 };
+      cur.qtd += qtd; cur.kg += kg;
+      porProduto.set(pid, cur);
+    }
+    await sleep(400);
+  }
+
+  const produtos = [...porProduto.values()]
+    .map((p) => ({ ...p, kg: Math.round(p.kg * 1000) / 1000 }))
+    .sort((a, b) => b.kg - a.kg);
+
+  return {
+    fornecedor, ano: Number(ano), mes: Number(mes), dataInicial, dataFinal,
+    pedidosNoPeriodo: pedidos.length,
+    itensContabilizados: totalItens,
+    totalKg: Math.round(totalKg * 1000) / 1000,
+    alertaItensSemPeso: produtosSemPeso,
+    produtos,
+  };
+}
+
 // TEMPORÁRIO: diagnóstico do estado da conexão (status HTTP real de cada rota).
 export async function blingDiagnostics() {
   const out = { configured: blingConfigured() };

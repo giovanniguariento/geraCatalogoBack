@@ -2,7 +2,7 @@ import { Router } from 'express';
 import {
   blingConfigured, isConnected, buildAuthUrl, checkState, exchangeCode,
   searchProducts, getProductDetail, rememberReturnUrl, resolveReturnUrl, warmProductCache,
-  discoverySample, blingDiagnostics,
+  discoverySample, blingDiagnostics, weightSoldBySupplier,
 } from '../bling.js';
 
 // Páginas HTML simples (fallback quando não há frontend pra onde voltar)
@@ -100,4 +100,19 @@ dataRouter.get('/produtos/:id', async (req, res) => {
   if (!(await isConnected())) return res.json({ connected: false, produto: null });
   const produto = await getProductDetail(req.params.id);
   res.json({ connected: true, produto });
+});
+
+// Relatório: peso líquido vendido por fornecedor, no mês
+dataRouter.get('/relatorio/peso-fornecedor', async (req, res) => {
+  if (!(await isConnected())) return res.status(400).json({ error: 'Bling não conectado' });
+  const { ano, mes, fornecedor } = req.query;
+  if (!ano || !mes || !fornecedor) {
+    return res.status(400).json({ error: 'Informe ano, mes e fornecedor' });
+  }
+  try {
+    const r = await weightSoldBySupplier({ ano, mes, fornecedor: String(fornecedor) });
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: String(e.message || e) });
+  }
 });
