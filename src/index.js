@@ -5,6 +5,7 @@ import { initDb } from './db.js';
 import catalogs from './routes/catalogs.js';
 import pages from './routes/pages.js';
 import { oauthRouter, dataRouter as blingData } from './routes/bling.js';
+import zplRouter from './routes/zpl.js';
 import { startFilaAutoSync } from './bling.js';
 
 const app = express();
@@ -34,6 +35,7 @@ app.use('/bling', oauthRouter);
 
 app.use('/api/catalogs', catalogs);
 app.use('/api/bling', blingData); // status + busca de produtos (usado pelo frontend)
+app.use('/api/zpl', zplRouter); // conversor ZPL -> PDF
 app.use('/api', pages); // /api/pages/:id
 
 app.use((err, _req, res, _next) => {
