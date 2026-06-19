@@ -5,6 +5,7 @@ import { initDb } from './db.js';
 import catalogs from './routes/catalogs.js';
 import pages from './routes/pages.js';
 import { oauthRouter, dataRouter as blingData } from './routes/bling.js';
+import { startFilaAutoSync } from './bling.js';
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -41,5 +42,8 @@ app.use((err, _req, res, _next) => {
 });
 
 initDb()
-  .then(() => app.listen(PORT, () => console.log(`[api] rodando na porta ${PORT}`)))
+  .then(() => app.listen(PORT, () => {
+    console.log(`[api] rodando na porta ${PORT}`);
+    startFilaAutoSync();
+  }))
   .catch((e) => { console.error('[db] falha ao iniciar:', e); process.exit(1); });

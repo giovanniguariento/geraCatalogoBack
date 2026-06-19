@@ -329,9 +329,13 @@ async function getOrderItems(id) {
   if (c && Date.now() - c.at < ORDER_TTL) return c.itens;
   const j = await blingGet('/pedidos/vendas/' + id);
   const raw = j && j.data && Array.isArray(j.data.itens) ? j.data.itens : [];
-  const itens = raw
-    .map((it) => ({ pid: it.produto && it.produto.id, qtd: Number(it.quantidade) || 0 }))
-    .filter((x) => x.pid);
+  const itens = raw.map((it) => ({
+    pid: it.produto && it.produto.id,
+    qtd: Number(it.quantidade) || 0,
+    codigo: String(it.codigo || '').trim(),
+    descricao: it.descricao || '',
+    valor: Number(it.valor) || 0,
+  }));
   orderItemsCache.set(id, { itens, at: Date.now() });
   return itens;
 }
@@ -364,6 +368,7 @@ export async function weightSoldBySupplier({ ano, mes, fornecedor, onProgress })
   for (const pedidoId of pedidos) {
     const itens = await getOrderItems(pedidoId);
     for (const it of itens) {
+      if (!it.pid) continue;
       const info = await getProductInfo(it.pid);
       if (!info) continue;
       if (alvo && !norm(info.fornecedor).includes(alvo)) continue; // filtra pelo fornecedor
@@ -408,6 +413,284 @@ export function startWeightReportJob({ ano, mes, fornecedor }) {
 }
 export function getReportJob(jobId) {
   return reportJobs.get(jobId) || null;
+}
+
+// ---- Fila de impressão (persistida no Postgres via app_config) ----
+const FILA_KEY = 'fila_queue';            // mapa { sku: item }
+const FILA_PROCESSED_KEY = 'fila_processed'; // array de pedidos já concluídos
+const FILA_ALTA = Number(process.env.FILA_PRECO_ALTA || 49);
+const FILA_MEDIA = Number(process.env.FILA_PRECO_MEDIA || 30);
+const FILA_SITUACAO = process.env.FILA_ID_SITUACAO || '6'; // 6 = Em aberto
+const FILA_DIAS_JANELA = Number(process.env.FILA_DIAS_JANELA || 3); // janela de data p/ não-Meli
+
+function filaPriority(price) {
+  const p = Number(price) || 0;
+  if (p >= FILA_ALTA) return 'Alta';
+  if (p >= FILA_MEDIA) return 'Média';
+  return 'Baixa';
+}
+function isExcludedSku(sku) {
+  const u = String(sku || '').toUpperCase();
+  return u.startsWith('PL') || u.startsWith('PG'); // filamentos e afins ficam de fora
+}
+function isMaskedName(name) { return typeof name === 'string' && /\*/.test(name); }
+
+function identifyMarketplace(numeroLoja) {
+  const n = String(numeroLoja || '').trim();
+  if (!n) return { id: 'direct', label: 'Direto' };
+  if (/^\d{3}-\d{7}-\d{7}/.test(n)) return { id: 'amazon', label: 'Amazon' };
+  if (/^\d+$/.test(n)) {
+    if (n.length === 16) return { id: 'meli', label: 'Mercado Livre' };
+    if (n.length === 18) return { id: 'tiktok', label: 'TikTok' };
+  }
+  if (/^\d{6,8}[A-Z0-9]+$/i.test(n)) return { id: 'shopee', label: 'Shopee' };
+  return { id: 'other', label: 'Outros' };
+}
+function isMercadoLivre(numeroLoja) { return identifyMarketplace(numeroLoja).id === 'meli'; }
+
+async function readFila() {
+  const raw = await getConfig(FILA_KEY);
+  try { return raw ? JSON.parse(raw) : {}; } catch { return {}; }
+}
+async function writeFila(map) { await setConfig(FILA_KEY, JSON.stringify(map)); }
+async function readProcessed() {
+  const raw = await getConfig(FILA_PROCESSED_KEY);
+  try { return new Set(raw ? JSON.parse(raw) : []); } catch { return new Set(); }
+}
+async function writeProcessed(set) { await setConfig(FILA_PROCESSED_KEY, JSON.stringify([...set])); }
+
+function getOrderIds(item) {
+  if (!item || !item.orderId) return [];
+  return String(item.orderId).split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+// Lista pedidos em aberto (situação 6). Não-Meli: janela dos últimos N dias.
+// Meli: todos em aberto (sem filtro de data). Junta sem duplicar.
+async function listOpenOrders() {
+  const fmt = (d) => d.toISOString().split('T')[0];
+  const hoje = new Date();
+  const ini = new Date(hoje); ini.setDate(hoje.getDate() - FILA_DIAS_JANELA);
+  const amanha = new Date(hoje); amanha.setDate(hoje.getDate() + 1);
+
+  async function pages(params) {
+    const out = [];
+    for (let pagina = 1; pagina <= 50; pagina++) {
+      const p = new URLSearchParams({ ...params, pagina: String(pagina), limite: '100' });
+      const j = await blingGet('/pedidos/vendas?' + p.toString());
+      const arr = j && Array.isArray(j.data) ? j.data : [];
+      if (!arr.length) break;
+      out.push(...arr);
+      if (arr.length < 100) break;
+    }
+    return out;
+  }
+
+  const datados = (await pages({ idsSituacoes: FILA_SITUACAO, dataInicial: fmt(ini), dataFinal: fmt(amanha) }))
+    .filter((o) => !isMercadoLivre(o.numeroLoja));
+  const meli = (await pages({ idsSituacoes: FILA_SITUACAO }))
+    .filter((o) => isMercadoLivre(o.numeroLoja));
+
+  const seen = new Set();
+  const merged = [];
+  for (const o of [...meli, ...datados]) {
+    if (FILA_SITUACAO && o.situacao && String(o.situacao.id) !== String(FILA_SITUACAO)) continue;
+    if (!seen.has(o.id)) { seen.add(o.id); merged.push(o); }
+  }
+  return merged;
+}
+
+// Monta itens agregados por SKU a partir dos pedidos (com itens já carregados)
+function buildPrintingQueue(orders) {
+  const grouped = new Map();
+  for (const order of orders) {
+    const orderId = String(order.numero || order.id || '');
+    const numeroLoja = String(order.numeroLoja || '').trim();
+    const contactName = (order.contato && order.contato.nome) || '';
+    const marketplace = identifyMarketplace(numeroLoja);
+
+    // Nome mascarado → ignora, exceto Mercado Livre
+    if (!isMercadoLivre(numeroLoja) && isMaskedName(contactName)) continue;
+
+    for (const it of (order.itens || [])) {
+      const sku = String(it.codigo || '').trim();
+      if (!sku || isExcludedSku(sku)) continue;
+      const productName = it.descricao || 'Produto sem nome';
+      const quantity = Number(it.qtd) || 1;
+      const price = Number(it.valor) || 0;
+
+      if (grouped.has(sku)) {
+        const e = grouped.get(sku);
+        e.quantity += quantity;
+        if (!e.orderIds.includes(orderId)) e.orderIds.push(orderId);
+        if (numeroLoja && !e.lojaIds.includes(numeroLoja)) e.lojaIds.push(numeroLoja);
+        if (!e.marketplaces.some((m) => m.id === marketplace.id)) e.marketplaces.push(marketplace);
+      } else {
+        grouped.set(sku, {
+          orderIds: [orderId], lojaIds: numeroLoja ? [numeroLoja] : [],
+          marketplaces: [marketplace], productName, sku, quantity, price,
+          priority: filaPriority(price),
+        });
+      }
+    }
+  }
+  return [...grouped.values()].map((it) => ({
+    orderId: it.orderIds.join(', '), lojaId: it.lojaIds.join(', '),
+    marketplaces: it.marketplaces, productName: it.productName, sku: it.sku,
+    quantity: it.quantity, price: it.price, priority: it.priority,
+  }));
+}
+
+// Merge dos itens do Bling com a fila persistida (não duplica pedidos já contados/concluídos)
+async function mergeWithBling(blingItems) {
+  const queue = await readFila();
+  const processed = await readProcessed();
+
+  for (const item of blingItems) {
+    const sku = item.sku;
+    const allIds = item.orderId.split(',').map((s) => s.trim()).filter(Boolean);
+    const newIds = allIds.filter((id) => !processed.has(id));
+    if (allIds.length > 0 && newIds.length === 0) continue; // todos já concluídos
+
+    const newQty = newIds.length > 0 && allIds.length > 0
+      ? Math.round(item.quantity * (newIds.length / allIds.length))
+      : item.quantity;
+
+    if (queue[sku] && !queue[sku].manual) {
+      const prevIds = getOrderIds(queue[sku]);
+      const brandNewIds = newIds.filter((id) => !prevIds.includes(id));
+      if (brandNewIds.length > 0) {
+        const addQty = Math.round(item.quantity * (brandNewIds.length / allIds.length));
+        queue[sku].quantity += addQty;
+        queue[sku].orderId = [...new Set([...prevIds, ...brandNewIds])].join(', ');
+      }
+      queue[sku].productName = item.productName;
+      queue[sku].price = item.price;
+      queue[sku].priority = item.priority;
+      queue[sku].lojaId = item.lojaId;
+      queue[sku].marketplaces = item.marketplaces;
+      queue[sku]._seenInBling = true;
+    } else if (!queue[sku]) {
+      queue[sku] = {
+        productName: item.productName, sku, quantity: newQty, printed: 0,
+        price: item.price, priority: item.priority, orderId: newIds.join(', '),
+        lojaId: item.lojaId, marketplaces: item.marketplaces, manual: false, _seenInBling: true,
+      };
+    }
+  }
+  await writeFila(queue);
+  return queue;
+}
+
+function filaList(map) {
+  return Object.values(map)
+    .filter((it) => it.sku && String(it.sku).trim())
+    .map((it) => ({
+      productName: it.productName, sku: it.sku, quantity: it.quantity, printed: it.printed,
+      remaining: Math.max(0, (Number(it.quantity) || 0) - (Number(it.printed) || 0)),
+      price: it.price, priority: it.priority, orderId: it.orderId, lojaId: it.lojaId,
+      marketplaces: it.marketplaces || [], manual: it.manual || false,
+    }))
+    .sort((a, b) => (Number(b.price) || 0) - (Number(a.price) || 0));
+}
+
+export async function getFila() { return filaList(await readFila()); }
+
+export async function syncFila() {
+  const orders = await listOpenOrders();
+  // carrega itens de cada pedido
+  for (const o of orders) {
+    if (!o.itens) o.itens = await getOrderItems(o.id);
+  }
+  const blingItems = orders.length ? buildPrintingQueue(orders) : [];
+  const queue = await mergeWithBling(blingItems);
+  return { pedidosLidos: orders.length, fila: filaList(queue) };
+}
+
+export async function setFilaPrinted(sku, printed) {
+  const queue = await readFila();
+  const key = String(sku);
+  if (!queue[key]) throw new Error('Item não encontrado na fila');
+  const clamped = Math.max(0, Number(printed) || 0);
+  queue[key].printed = clamped;
+  if (clamped >= (Number(queue[key].quantity) || 0)) {
+    const processed = await readProcessed();
+    for (const id of getOrderIds(queue[key])) processed.add(id);
+    await writeProcessed(processed);
+    delete queue[key];
+  }
+  await writeFila(queue);
+  return filaList(queue);
+}
+
+export async function addManualFila({ sku, productName, quantity, price, orderId }) {
+  sku = String(sku || '').trim();
+  if (!sku) throw new Error('SKU é obrigatório');
+  const qtd = Number(quantity) || 0;
+  if (qtd <= 0) throw new Error('Quantidade deve ser maior que zero');
+  const valor = Number(price) || 0;
+  if (valor <= 0) throw new Error('Preço é obrigatório');
+  if (!productName) throw new Error('Nome é obrigatório');
+  const queue = await readFila();
+  if (queue[sku]) {
+    queue[sku].quantity += qtd;
+    if (orderId) queue[sku].orderId = [queue[sku].orderId, orderId].filter(Boolean).join(', ');
+  } else {
+    queue[sku] = {
+      productName, sku, quantity: qtd, printed: 0, price: valor, priority: filaPriority(valor),
+      orderId: orderId || '', lojaId: '', marketplaces: [{ id: 'direct', label: 'Manual' }],
+      manual: true, _seenInBling: false,
+    };
+  }
+  await writeFila(queue);
+  return filaList(queue);
+}
+
+export async function removeFilaItem(sku) {
+  const queue = await readFila();
+  const key = Object.keys(queue).find((k) => k === sku || k.trim() === String(sku).trim());
+  if (key === undefined) throw new Error('SKU não encontrado na fila');
+  delete queue[key];
+  await writeFila(queue);
+  return filaList(queue);
+}
+
+export async function importFila({ queue, processed, seen }) {
+  const out = {};
+  const src = queue && typeof queue === 'object' ? queue : {};
+  for (const [k, v] of Object.entries(src)) {
+    if (!v || typeof v !== 'object') continue;
+    const sku = String(v.sku || k || '').trim();
+    if (!sku || isExcludedSku(sku)) continue; // ignora SKU vazio e filamentos
+    out[sku] = {
+      productName: v.productName || sku, sku,
+      quantity: Number(v.quantity) || 0, printed: Number(v.printed) || 0,
+      price: Number(v.price) || 0, priority: v.priority || filaPriority(v.price),
+      orderId: v.orderId || '', lojaId: v.lojaId || '',
+      marketplaces: Array.isArray(v.marketplaces) ? v.marketplaces : [],
+      manual: !!v.manual, _seenInBling: v._seenInBling !== false,
+    };
+  }
+  await writeFila(out);
+  const arr = Array.isArray(processed) ? processed : (Array.isArray(seen) ? seen : []);
+  await writeProcessed(new Set(arr.map(String)));
+  return { itensImportados: Object.keys(out).length, pedidosConcluidos: arr.length };
+}
+
+// Auto-refresh da fila a cada 20 min (igual ao app antigo): mantém a fila
+// atualizada no servidor pra todas as telas, sem depender de clique.
+let _filaAutoTimer = null;
+export function startFilaAutoSync(intervalMs = 20 * 60 * 1000) {
+  if (_filaAutoTimer) return;
+  const run = async () => {
+    try {
+      if (blingConfigured() && (await isConnected())) {
+        const r = await syncFila();
+        console.log(`[fila] auto-sync: ${r.pedidosLidos} pedidos lidos`);
+      }
+    } catch (e) { console.error('[fila] auto-sync falhou:', e.message); }
+  };
+  setTimeout(run, 15000); // primeira rodada 15s após subir
+  _filaAutoTimer = setInterval(run, intervalMs);
 }
 
 // TEMPORÁRIO: diagnóstico do estado da conexão (status HTTP real de cada rota).

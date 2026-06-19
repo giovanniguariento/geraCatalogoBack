@@ -3,6 +3,7 @@ import {
   blingConfigured, isConnected, buildAuthUrl, checkState, exchangeCode,
   searchProducts, getProductDetail, rememberReturnUrl, resolveReturnUrl, warmProductCache,
   discoverySample, blingDiagnostics, startWeightReportJob, getReportJob,
+  getFila, syncFila, addManualFila, setFilaPrinted, removeFilaItem, importFila,
 } from '../bling.js';
 
 // Páginas HTML simples (fallback quando não há frontend pra onde voltar)
@@ -117,4 +118,38 @@ dataRouter.get('/relatorio/peso-fornecedor/status', (req, res) => {
   const job = getReportJob(String(req.query.jobId || ''));
   if (!job) return res.status(404).json({ error: 'Job não encontrado (pode ter expirado). Recalcule.' });
   res.json({ status: job.status, progress: job.progress, result: job.result, error: job.error });
+});
+
+// ---- Fila de impressão ----
+dataRouter.get('/fila', async (_req, res) => {
+  try { res.json({ fila: await getFila() }); }
+  catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+dataRouter.post('/fila/atualizar', async (_req, res) => {
+  if (!(await isConnected())) return res.status(400).json({ error: 'Bling não conectado' });
+  try { res.json(await syncFila()); }
+  catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+dataRouter.post('/fila/manual', async (req, res) => {
+  try { res.json({ fila: await addManualFila(req.body || {}) }); }
+  catch (e) { res.status(400).json({ error: String(e.message || e) }); }
+});
+
+dataRouter.post('/fila/impresso', async (req, res) => {
+  const { sku, printed } = req.body || {};
+  try { res.json({ fila: await setFilaPrinted(sku, printed) }); }
+  catch (e) { res.status(400).json({ error: String(e.message || e) }); }
+});
+
+dataRouter.post('/fila/remover', async (req, res) => {
+  const { sku } = req.body || {};
+  try { res.json({ fila: await removeFilaItem(sku) }); }
+  catch (e) { res.status(400).json({ error: String(e.message || e) }); }
+});
+
+dataRouter.post('/fila/importar', async (req, res) => {
+  try { res.json(await importFila(req.body || {})); }
+  catch (e) { res.status(400).json({ error: String(e.message || e) }); }
 });
