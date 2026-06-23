@@ -3,7 +3,8 @@ import {
   blingConfigured, isConnected, buildAuthUrl, checkState, exchangeCode,
   searchProducts, getProductDetail, rememberReturnUrl, resolveReturnUrl, warmProductCache,
   discoverySample, blingDiagnostics, startWeightReportJob, getReportJob,
-  getFila, syncFila, addManualFila, setFilaPrinted, setFilaStock, removeFilaItem, importFila,
+  getFila, syncFila, addManualFila, setFilaPrinted, removeFilaItem, importFila,
+  getEstoque, setEstoque, removeEstoque,
 } from '../bling.js';
 
 // Páginas HTML simples (fallback quando não há frontend pra onde voltar)
@@ -143,9 +144,19 @@ dataRouter.post('/fila/impresso', async (req, res) => {
   catch (e) { res.status(400).json({ error: String(e.message || e) }); }
 });
 
-dataRouter.post('/fila/estoque', async (req, res) => {
-  const { sku, stock } = req.body || {};
-  try { res.json({ fila: await setFilaStock(sku, stock) }); }
+dataRouter.get('/estoque', async (_req, res) => {
+  try { res.json({ estoque: await getEstoque() }); }
+  catch (e) { res.status(400).json({ error: String(e.message || e) }); }
+});
+
+dataRouter.post('/estoque', async (req, res) => {
+  try { res.json({ estoque: await setEstoque(req.body || {}) }); }
+  catch (e) { res.status(400).json({ error: String(e.message || e) }); }
+});
+
+dataRouter.post('/estoque/remover', async (req, res) => {
+  const { sku } = req.body || {};
+  try { res.json({ estoque: await removeEstoque(sku) }); }
   catch (e) { res.status(400).json({ error: String(e.message || e) }); }
 });
 

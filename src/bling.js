@@ -471,6 +471,43 @@ async function readProcessed() {
 }
 async function writeProcessed(set) { await setConfig(FILA_PROCESSED_KEY, JSON.stringify([...set])); }
 
+// ---- Registro de estoque (aba Estoque): { sku: { sku, productName, stock, updatedAt } } ----
+const FILA_ESTOQUE_KEY = 'fila_estoque';
+async function readEstoque() {
+  const raw = await getConfig(FILA_ESTOQUE_KEY);
+  try { return raw ? JSON.parse(raw) : {}; } catch { return {}; }
+}
+async function writeEstoque(map) { await setConfig(FILA_ESTOQUE_KEY, JSON.stringify(map)); }
+function estoqueList(map) {
+  return Object.values(map).sort((a, b) => String(a.productName || '').localeCompare(String(b.productName || ''), 'pt-BR'));
+}
+
+export async function getEstoque() { return estoqueList(await readEstoque()); }
+
+export async function setEstoque({ sku, productName, stock }) {
+  const key = String(sku || '').trim();
+  if (!key) throw new Error('SKU é obrigatório');
+  const map = await readEstoque();
+  const prev = map[key] || {};
+  map[key] = {
+    sku: key,
+    productName: productName != null ? String(productName) : (prev.productName || key),
+    stock: Math.max(0, Number(stock) || 0),
+    updatedAt: new Date().toISOString(),
+  };
+  await writeEstoque(map);
+  return estoqueList(map);
+}
+
+export async function removeEstoque(sku) {
+  const map = await readEstoque();
+  delete map[String(sku)];
+  await writeEstoque(map);
+  return estoqueList(map);
+}
+
+async function filaResponse(queue) { return filaList(queue, await readEstoque()); }
+
 function getOrderIds(item) {
   if (!item || !item.orderId) return [];
   return String(item.orderId).split(',').map((s) => s.trim()).filter(Boolean);
@@ -593,34 +630,38 @@ async function mergeWithBling(blingItems) {
   return queue;
 }
 
-function filaList(map) {
+function filaList(map, estoque = {}) {
   return Object.values(map)
     .filter((it) => it.sku && String(it.sku).trim())
     .map((it) => {
       const quantity = Number(it.quantity) || 0;
       const printed = Number(it.printed) || 0;
-      const stock = Number(it.stock) || 0;
-      const remaining = Math.max(0, quantity - printed);     // ainda falta imprimir
-      const deficit = Math.max(0, remaining - stock);         // o que falta além do estoque
-      const reposicao = remaining > 0 && deficit === 0;       // estoque cobre os pedidos → só repor
-      const semEstoque = remaining > 0 && stock === 0;        // nada em estoque → urgente
-      // Com estoque cobrindo os pedidos, vira reposição (baixa). Senão, pelo valor.
+      const remaining = Math.max(0, quantity - printed);
+      const reg = estoque[it.sku];
+      const temEstoque = !!reg;                 // está cadastrado na aba Estoque?
+      const stock = temEstoque ? Math.max(0, Number(reg.stock) || 0) : null;
+      let reposicao = false, semEstoque = false, deficit = remaining;
+      if (temEstoque) {
+        deficit = Math.max(0, remaining - stock);
+        reposicao = remaining > 0 && deficit === 0;   // estoque cobre os pedidos → reposição
+        semEstoque = remaining > 0 && stock === 0;    // cadastrado, mas zerado → urgente
+      }
+      // Só vira reposição (baixa) quando o estoque cobre. Senão, prioridade pelo valor (como antes).
       const priority = reposicao ? 'Baixa' : filaPriority(it.price);
       return {
         productName: it.productName, sku: it.sku, quantity, printed, stock,
-        remaining, deficit, reposicao, semEstoque,
+        remaining, deficit, reposicao, semEstoque, temEstoque,
         price: it.price, priority, orderId: it.orderId, lojaId: it.lojaId,
         marketplaces: it.marketplaces || [], manual: it.manual || false,
       };
     })
-    // urgentes (sem cobertura de estoque) primeiro; reposição por último; dentro de cada grupo, maior valor primeiro
     .sort((a, b) => {
       if (a.reposicao !== b.reposicao) return a.reposicao ? 1 : -1;
       return (Number(b.price) || 0) - (Number(a.price) || 0);
     });
 }
 
-export async function getFila() { return filaList(await readFila()); }
+export async function getFila() { return filaResponse(await readFila()); }
 
 export async function syncFila() {
   const orders = await listOpenOrders();
@@ -630,7 +671,7 @@ export async function syncFila() {
   }
   const blingItems = orders.length ? buildPrintingQueue(orders) : [];
   const queue = await mergeWithBling(blingItems);
-  return { pedidosLidos: orders.length, fila: filaList(queue) };
+  return { pedidosLidos: orders.length, fila: await filaResponse(queue) };
 }
 
 export async function setFilaPrinted(sku, printed) {
@@ -646,19 +687,10 @@ export async function setFilaPrinted(sku, printed) {
     delete queue[key];
   }
   await writeFila(queue);
-  return filaList(queue);
+  return filaResponse(queue);
 }
 
-export async function setFilaStock(sku, stock) {
-  const queue = await readFila();
-  const key = String(sku);
-  if (!queue[key]) throw new Error('Item não encontrado na fila');
-  queue[key].stock = Math.max(0, Number(stock) || 0);
-  await writeFila(queue);
-  return filaList(queue);
-}
-
-export async function addManualFila({ sku, productName, quantity, price, orderId, stock }) {
+export async function addManualFila({ sku, productName, quantity, price, orderId }) {
   sku = String(sku || '').trim();
   if (!sku) throw new Error('SKU é obrigatório');
   const qtd = Number(quantity) || 0;
@@ -669,18 +701,17 @@ export async function addManualFila({ sku, productName, quantity, price, orderId
   const queue = await readFila();
   if (queue[sku]) {
     queue[sku].quantity += qtd;
-    if (stock != null) queue[sku].stock = Math.max(0, Number(stock) || 0);
     if (orderId) queue[sku].orderId = [queue[sku].orderId, orderId].filter(Boolean).join(', ');
   } else {
     queue[sku] = {
-      productName, sku, quantity: qtd, printed: 0, stock: Math.max(0, Number(stock) || 0),
+      productName, sku, quantity: qtd, printed: 0,
       price: valor, priority: filaPriority(valor),
       orderId: orderId || '', lojaId: '', marketplaces: [{ id: 'direct', label: 'Manual' }],
       manual: true, _seenInBling: false,
     };
   }
   await writeFila(queue);
-  return filaList(queue);
+  return filaResponse(queue);
 }
 
 export async function removeFilaItem(sku) {
@@ -689,7 +720,7 @@ export async function removeFilaItem(sku) {
   if (key === undefined) throw new Error('SKU não encontrado na fila');
   delete queue[key];
   await writeFila(queue);
-  return filaList(queue);
+  return filaResponse(queue);
 }
 
 export async function importFila({ queue, processed, seen }) {
