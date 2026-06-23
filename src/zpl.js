@@ -1,4 +1,5 @@
-import { PDFDocument } from 'pdf-lib';
+// Observação: o pdf-lib é carregado de forma TARDIA (import dinâmico) só quando
+// precisamos juntar vários blocos. Assim o backend sobe mesmo sem ele instalado.
 
 const LABELARY_BASE = process.env.LABELARY_URL || 'http://api.labelary.com';
 const LABELARY_KEY = process.env.LABELARY_API_KEY || '';
@@ -67,21 +68,25 @@ export async function convertZplToPdf({ zpl, dpmm = 8, width = 4, height = 6, ro
   if (!labels.length) throw new Error('Nenhuma etiqueta ^XA…^XZ encontrada no texto.');
 
   const base = `${LABELARY_BASE}/v1/printers/${dpmm}dpmm/labels/${width}x${height}/`;
-  const parts = [];
-  for (let i = 0; i < labels.length; i += batchSize) {
-    const batch = labels.slice(i, i + batchSize).join('');
-    parts.push(await renderBatch(base, batch, rotation));
-    if (i + batchSize < labels.length) await sleep(350); // respeita ~3 req/s
+
+  // 1) Tenta tudo numa requisição só (sem índice => PDF com TODAS as etiquetas).
+  //    Resolve o caso comum sem precisar do pdf-lib.
+  try {
+    const pdf = await renderBatch(base, labels.join(''), rotation);
+    return { pdf, labels: labels.length };
+  } catch (e) {
+    if (labels.length <= batchSize) throw e; // erro real, não é tamanho
   }
 
-  if (parts.length === 1) return { pdf: parts[0], labels: labels.length };
-
-  // junta os PDFs dos blocos em um só
+  // 2) Lote grande demais p/ uma requisição: renderiza em blocos e junta (pdf-lib tardio)
+  const { PDFDocument } = await import('pdf-lib');
   const out = await PDFDocument.create();
-  for (const buf of parts) {
+  for (let i = 0; i < labels.length; i += batchSize) {
+    const buf = await renderBatch(base, labels.slice(i, i + batchSize).join(''), rotation);
     const doc = await PDFDocument.load(buf);
     const pages = await out.copyPages(doc, doc.getPageIndices());
     pages.forEach((p) => out.addPage(p));
+    if (i + batchSize < labels.length) await sleep(350);
   }
   return { pdf: Buffer.from(await out.save()), labels: labels.length };
 }

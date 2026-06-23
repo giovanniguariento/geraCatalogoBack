@@ -429,9 +429,21 @@ function filaPriority(price) {
   if (p >= FILA_MEDIA) return 'Média';
   return 'Baixa';
 }
+// Filamentos ficam fora da fila. Casamos pelo PRIMEIRO segmento do SKU (antes do
+// primeiro "-"): prefixos de material (PLA, PETG…) por "começa com", e códigos
+// curtos (PL, PG) só quando o segmento é EXATAMENTE igual — assim "PG" (filamento)
+// é excluído, mas "PGO-PAR-DEC-GOT-MM" (produto) entra normalmente.
+const FILA_FILAMENTO_PREFIXOS = (process.env.FILA_FILAMENTO_PREFIXOS || 'PL')
+  .split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+const FILA_FILAMENTO_EXATOS = (process.env.FILA_FILAMENTO_EXATOS || 'PG')
+  .split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+
 function isExcludedSku(sku) {
-  const u = String(sku || '').toUpperCase();
-  return u.startsWith('PL') || u.startsWith('PG'); // filamentos e afins ficam de fora
+  const u = String(sku || '').toUpperCase().trim();
+  if (!u) return true; // SKU vazio (rolos de filamento sem SKU)
+  const seg = u.split('-')[0]; // primeiro segmento
+  if (FILA_FILAMENTO_EXATOS.includes(seg)) return true; // "PL" / "PG" exatos
+  return FILA_FILAMENTO_PREFIXOS.some((p) => seg.startsWith(p)); // "PLA…", "PETG…"
 }
 function isMaskedName(name) { return typeof name === 'string' && /\*/.test(name); }
 
@@ -571,7 +583,7 @@ async function mergeWithBling(blingItems) {
       queue[sku]._seenInBling = true;
     } else if (!queue[sku]) {
       queue[sku] = {
-        productName: item.productName, sku, quantity: newQty, printed: 0,
+        productName: item.productName, sku, quantity: newQty, printed: 0, stock: 0,
         price: item.price, priority: item.priority, orderId: newIds.join(', '),
         lojaId: item.lojaId, marketplaces: item.marketplaces, manual: false, _seenInBling: true,
       };
@@ -584,13 +596,28 @@ async function mergeWithBling(blingItems) {
 function filaList(map) {
   return Object.values(map)
     .filter((it) => it.sku && String(it.sku).trim())
-    .map((it) => ({
-      productName: it.productName, sku: it.sku, quantity: it.quantity, printed: it.printed,
-      remaining: Math.max(0, (Number(it.quantity) || 0) - (Number(it.printed) || 0)),
-      price: it.price, priority: it.priority, orderId: it.orderId, lojaId: it.lojaId,
-      marketplaces: it.marketplaces || [], manual: it.manual || false,
-    }))
-    .sort((a, b) => (Number(b.price) || 0) - (Number(a.price) || 0));
+    .map((it) => {
+      const quantity = Number(it.quantity) || 0;
+      const printed = Number(it.printed) || 0;
+      const stock = Number(it.stock) || 0;
+      const remaining = Math.max(0, quantity - printed);     // ainda falta imprimir
+      const deficit = Math.max(0, remaining - stock);         // o que falta além do estoque
+      const reposicao = remaining > 0 && deficit === 0;       // estoque cobre os pedidos → só repor
+      const semEstoque = remaining > 0 && stock === 0;        // nada em estoque → urgente
+      // Com estoque cobrindo os pedidos, vira reposição (baixa). Senão, pelo valor.
+      const priority = reposicao ? 'Baixa' : filaPriority(it.price);
+      return {
+        productName: it.productName, sku: it.sku, quantity, printed, stock,
+        remaining, deficit, reposicao, semEstoque,
+        price: it.price, priority, orderId: it.orderId, lojaId: it.lojaId,
+        marketplaces: it.marketplaces || [], manual: it.manual || false,
+      };
+    })
+    // urgentes (sem cobertura de estoque) primeiro; reposição por último; dentro de cada grupo, maior valor primeiro
+    .sort((a, b) => {
+      if (a.reposicao !== b.reposicao) return a.reposicao ? 1 : -1;
+      return (Number(b.price) || 0) - (Number(a.price) || 0);
+    });
 }
 
 export async function getFila() { return filaList(await readFila()); }
@@ -622,7 +649,16 @@ export async function setFilaPrinted(sku, printed) {
   return filaList(queue);
 }
 
-export async function addManualFila({ sku, productName, quantity, price, orderId }) {
+export async function setFilaStock(sku, stock) {
+  const queue = await readFila();
+  const key = String(sku);
+  if (!queue[key]) throw new Error('Item não encontrado na fila');
+  queue[key].stock = Math.max(0, Number(stock) || 0);
+  await writeFila(queue);
+  return filaList(queue);
+}
+
+export async function addManualFila({ sku, productName, quantity, price, orderId, stock }) {
   sku = String(sku || '').trim();
   if (!sku) throw new Error('SKU é obrigatório');
   const qtd = Number(quantity) || 0;
@@ -633,10 +669,12 @@ export async function addManualFila({ sku, productName, quantity, price, orderId
   const queue = await readFila();
   if (queue[sku]) {
     queue[sku].quantity += qtd;
+    if (stock != null) queue[sku].stock = Math.max(0, Number(stock) || 0);
     if (orderId) queue[sku].orderId = [queue[sku].orderId, orderId].filter(Boolean).join(', ');
   } else {
     queue[sku] = {
-      productName, sku, quantity: qtd, printed: 0, price: valor, priority: filaPriority(valor),
+      productName, sku, quantity: qtd, printed: 0, stock: Math.max(0, Number(stock) || 0),
+      price: valor, priority: filaPriority(valor),
       orderId: orderId || '', lojaId: '', marketplaces: [{ id: 'direct', label: 'Manual' }],
       manual: true, _seenInBling: false,
     };
@@ -663,7 +701,7 @@ export async function importFila({ queue, processed, seen }) {
     if (!sku || isExcludedSku(sku)) continue; // ignora SKU vazio e filamentos
     out[sku] = {
       productName: v.productName || sku, sku,
-      quantity: Number(v.quantity) || 0, printed: Number(v.printed) || 0,
+      quantity: Number(v.quantity) || 0, printed: Number(v.printed) || 0, stock: Number(v.stock) || 0,
       price: Number(v.price) || 0, priority: v.priority || filaPriority(v.price),
       orderId: v.orderId || '', lojaId: v.lojaId || '',
       marketplaces: Array.isArray(v.marketplaces) ? v.marketplaces : [],

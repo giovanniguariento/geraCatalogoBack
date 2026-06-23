@@ -1,5 +1,4 @@
 import express from 'express';
-import cors from 'cors';
 import 'dotenv/config';
 import { initDb } from './db.js';
 import catalogs from './routes/catalogs.js';
@@ -11,13 +10,19 @@ import { startFilaAutoSync } from './bling.js';
 const app = express();
 const PORT = process.env.PORT || 4000;
 
-// CORS: por padrão libera geral. Para restringir, defina FRONTEND_URL=https://seuapp.vercel.app
-const corsOptions = {
-  origin: process.env.FRONTEND_URL || true,
-  exposedHeaders: ['X-Label-Count', 'X-Label-Total', 'X-Label-Index', 'Content-Disposition'],
-};
-app.use(cors(corsOptions));
-app.options('*', cors(corsOptions)); // garante resposta ao preflight em todas as rotas
+// CORS manual e à prova de falhas: garante os headers em TODA resposta,
+// inclusive no preflight (OPTIONS), refletindo a origem que chamou.
+// Para restringir, defina FRONTEND_URL e troque a linha do Allow-Origin.
+app.use((req, res, next) => {
+  const allow = process.env.FRONTEND_URL || req.headers.origin || '*';
+  res.header('Access-Control-Allow-Origin', allow);
+  res.header('Vary', 'Origin');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', req.headers['access-control-request-headers'] || 'Content-Type, x-api-key');
+  res.header('Access-Control-Expose-Headers', 'X-Label-Count, X-Label-Total, X-Label-Index, Content-Disposition');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 
 // imagens em base64 viajam no corpo JSON -> limite maior
 app.use(express.json({ limit: '25mb' }));
