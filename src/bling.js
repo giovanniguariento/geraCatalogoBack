@@ -213,6 +213,18 @@ export async function searchProducts(q) {
   return matches.slice(0, 20);
 }
 
+// Consulta um produto pelo SKU (código): casa exato e, se não achar, "contém".
+export async function getProductBySku(sku) {
+  const want = norm(sku);
+  if (!want) return { found: false };
+  const index = await getProductIndex();
+  let hit = index.find((p) => norm(p.codigo) === want);
+  if (!hit) hit = index.find((p) => norm(p.codigo).includes(want));
+  if (!hit) return { found: false };
+  const produto = await getProductDetail(hit.id);
+  return { found: !!produto, produto };
+}
+
 // ---- Relatório: peso líquido vendido por fornecedor, por mês ----
 const produtoInfoCache = new Map(); // pid -> { pesoLiquido, fornecedorNome, nome }
 

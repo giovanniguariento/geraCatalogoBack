@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import {
   blingConfigured, isConnected, buildAuthUrl, checkState, exchangeCode,
-  searchProducts, getProductDetail, rememberReturnUrl, resolveReturnUrl, warmProductCache,
+  searchProducts, getProductDetail, getProductBySku, rememberReturnUrl, resolveReturnUrl, warmProductCache,
   discoverySample, blingDiagnostics, startWeightReportJob, getReportJob,
   getFila, syncFila, addManualFila, setFilaPrinted, removeFilaItem, importFila,
   getEstoque, setEstoque, removeEstoque,
@@ -102,6 +102,14 @@ dataRouter.get('/produtos/:id', async (req, res) => {
   if (!(await isConnected())) return res.json({ connected: false, produto: null });
   const produto = await getProductDetail(req.params.id);
   res.json({ connected: true, produto });
+});
+
+dataRouter.get('/produto-por-sku', async (req, res) => {
+  if (!(await isConnected())) return res.json({ connected: false, found: false, produto: null });
+  try {
+    const r = await getProductBySku(String(req.query.sku || ''));
+    res.json({ connected: true, ...r });
+  } catch (e) { res.status(502).json({ error: String(e.message || e) }); }
 });
 
 // Relatório: peso líquido vendido por fornecedor, no mês (em segundo plano)
