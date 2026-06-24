@@ -683,8 +683,13 @@ export async function syncFila() {
   }
   const blingItems = orders.length ? buildPrintingQueue(orders) : [];
   const queue = await mergeWithBling(blingItems);
-  return { pedidosLidos: orders.length, fila: await filaResponse(queue) };
+  const lastSync = new Date().toISOString();
+  await setConfig(FILA_SYNC_KEY, lastSync);
+  return { pedidosLidos: orders.length, fila: await filaResponse(queue), lastSync };
 }
+
+const FILA_SYNC_KEY = 'fila_last_sync';
+export async function getLastSync() { return (await getConfig(FILA_SYNC_KEY)) || null; }
 
 export async function setFilaPrinted(sku, printed) {
   const queue = await readFila();
@@ -760,7 +765,7 @@ export async function importFila({ queue, processed, seen }) {
 // Auto-refresh da fila a cada 20 min (igual ao app antigo): mantém a fila
 // atualizada no servidor pra todas as telas, sem depender de clique.
 let _filaAutoTimer = null;
-export function startFilaAutoSync(intervalMs = 20 * 60 * 1000) {
+export function startFilaAutoSync(intervalMs = (Number(process.env.FILA_AUTOSYNC_MIN) || 5) * 60 * 1000) {
   if (_filaAutoTimer) return;
   const run = async () => {
     try {

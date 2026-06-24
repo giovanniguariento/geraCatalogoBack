@@ -3,7 +3,7 @@ import {
   blingConfigured, isConnected, buildAuthUrl, checkState, exchangeCode,
   searchProducts, getProductDetail, getProductBySku, rememberReturnUrl, resolveReturnUrl, warmProductCache,
   discoverySample, blingDiagnostics, startWeightReportJob, getReportJob,
-  getFila, syncFila, addManualFila, setFilaPrinted, removeFilaItem, importFila,
+  getFila, syncFila, getLastSync, addManualFila, setFilaPrinted, removeFilaItem, importFila,
   getEstoque, setEstoque, removeEstoque,
 } from '../bling.js';
 
@@ -131,7 +131,7 @@ dataRouter.get('/relatorio/peso-fornecedor/status', (req, res) => {
 
 // ---- Fila de impressão ----
 dataRouter.get('/fila', async (_req, res) => {
-  try { res.json({ fila: await getFila() }); }
+  try { res.json({ fila: await getFila(), lastSync: await getLastSync() }); }
   catch (e) { res.status(500).json({ error: String(e.message || e) }); }
 });
 
