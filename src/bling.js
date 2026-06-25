@@ -724,16 +724,41 @@ export async function setFilaPrinted(sku, printed) {
   const queue = await readFila();
   const key = String(sku);
   if (!queue[key]) throw new Error('Item não encontrado na fila');
-  const clamped = Math.max(0, Number(printed) || 0);
-  queue[key].printed = clamped;
-  if (clamped >= (Number(queue[key].quantity) || 0)) {
-    const processed = await readProcessed();
-    for (const id of getOrderIds(queue[key])) processed.add(id);
-    await writeProcessed(processed);
-    delete queue[key];
-  }
+  queue[key].printed = Math.max(0, Number(printed) || 0); // pode passar do total (sobra)
   await writeFila(queue);
   return filaResponse(queue);
+}
+
+// Conclui o item: lança a sobra (impresso além do total) no estoque — criando o
+// produto na aba Estoque se ainda não existir — depois fecha os pedidos e remove da fila.
+export async function concluirFila(sku) {
+  const queue = await readFila();
+  const key = String(sku);
+  if (!queue[key]) throw new Error('Item não encontrado na fila');
+  const item = queue[key];
+  const quantity = Number(item.quantity) || 0;
+  const printed = Number(item.printed) || 0;
+  const surplus = Math.max(0, printed - quantity);
+
+  if (surplus > 0) {
+    const est = await readEstoque();
+    const prev = est[key];
+    est[key] = {
+      sku: key,
+      productName: (prev && prev.productName) || item.productName || key,
+      stock: Math.round((prev ? Number(prev.stock) || 0 : 0) + surplus),
+      committed: prev ? Number(prev.committed) || 0 : 0,
+      updatedAt: new Date().toISOString(),
+    };
+    await writeEstoque(est);
+  }
+
+  const processed = await readProcessed();
+  for (const id of getOrderIds(item)) processed.add(id);
+  await writeProcessed(processed);
+  delete queue[key];
+  await writeFila(queue);
+  return { fila: await filaResponse(queue), surplus };
 }
 
 export async function addManualFila({ sku, productName, quantity, price, orderId }) {

@@ -3,7 +3,7 @@ import {
   blingConfigured, isConnected, buildAuthUrl, checkState, exchangeCode,
   searchProducts, getProductDetail, getProductBySku, rememberReturnUrl, resolveReturnUrl, warmProductCache,
   discoverySample, blingDiagnostics, startWeightReportJob, getReportJob,
-  getFila, syncFila, getLastSync, addManualFila, setFilaPrinted, removeFilaItem, importFila,
+  getFila, syncFila, getLastSync, addManualFila, setFilaPrinted, concluirFila, removeFilaItem, importFila,
   getEstoque, setEstoque, removeEstoque,
 } from '../bling.js';
 
@@ -149,6 +149,12 @@ dataRouter.post('/fila/manual', async (req, res) => {
 dataRouter.post('/fila/impresso', async (req, res) => {
   const { sku, printed } = req.body || {};
   try { res.json({ fila: await setFilaPrinted(sku, printed) }); }
+  catch (e) { res.status(400).json({ error: String(e.message || e) }); }
+});
+
+dataRouter.post('/fila/concluir', async (req, res) => {
+  const { sku } = req.body || {};
+  try { res.json(await concluirFila(sku)); }
   catch (e) { res.status(400).json({ error: String(e.message || e) }); }
 });
 
