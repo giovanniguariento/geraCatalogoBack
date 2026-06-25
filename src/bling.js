@@ -494,7 +494,7 @@ function estoqueList(map) {
   return Object.values(map).sort((a, b) => String(a.productName || '').localeCompare(String(b.productName || ''), 'pt-BR'));
 }
 
-export async function getEstoque() { return estoqueList(await readEstoque()); }
+export async function getEstoque() { await reconcileEstoque(await readFila()); return estoqueList(await readEstoque()); }
 
 export async function setEstoque({ sku, productName, stock }) {
   const key = String(sku || '').trim();
@@ -504,7 +504,8 @@ export async function setEstoque({ sku, productName, stock }) {
   map[key] = {
     sku: key,
     productName: productName != null ? String(productName) : (prev.productName || key),
-    stock: Math.max(0, Number(stock) || 0),
+    stock: Math.round(Number(stock) || 0), // saldo atual (pode ser negativo = backorder)
+    committed: Number(prev.committed) || 0, // demanda em aberto já refletida no saldo
     updatedAt: new Date().toISOString(),
   };
   await writeEstoque(map);
@@ -518,7 +519,36 @@ export async function removeEstoque(sku) {
   return estoqueList(map);
 }
 
-async function filaResponse(queue) { return filaList(queue, await readEstoque()); }
+// Reconciliação idempotente do saldo: para cada SKU cadastrado, compara a demanda
+// em aberto na fila (quantity - printed) com o que já foi refletido (committed) e
+// ajusta o saldo pela diferença. Entrar pedido baixa; imprimir/concluir devolve.
+// Rodar isto a cada mudança na fila mantém o saldo certo sem debitar duas vezes.
+async function reconcileEstoque(queue) {
+  const map = await readEstoque();
+  if (!Object.keys(map).length) return;
+  const demanda = {};
+  for (const it of Object.values(queue)) {
+    const sku = it && it.sku ? String(it.sku) : '';
+    if (!sku) continue;
+    demanda[sku] = (demanda[sku] || 0) + Math.max(0, (Number(it.quantity) || 0) - (Number(it.printed) || 0));
+  }
+  let changed = false;
+  for (const sku of Object.keys(map)) {
+    const e = map[sku];
+    const rem = demanda[sku] || 0;
+    const committed = Number(e.committed) || 0;
+    const delta = rem - committed; // variação da demanda em aberto
+    if (delta !== 0) {
+      e.stock = Math.round((Number(e.stock) || 0) - delta); // mais demanda baixa; menos demanda devolve
+      e.committed = rem;
+      e.updatedAt = new Date().toISOString();
+      changed = true;
+    }
+  }
+  if (changed) await writeEstoque(map);
+}
+
+async function filaResponse(queue) { await reconcileEstoque(queue); return filaList(queue, await readEstoque()); }
 
 function getOrderIds(item) {
   if (!item || !item.orderId) return [];
@@ -651,14 +681,13 @@ function filaList(map, estoque = {}) {
       const remaining = Math.max(0, quantity - printed);
       const reg = estoque[it.sku];
       const temEstoque = !!reg;                 // está cadastrado na aba Estoque?
-      const stock = temEstoque ? Math.max(0, Number(reg.stock) || 0) : null;
-      let reposicao = false, semEstoque = false, deficit = remaining;
+      const stock = temEstoque ? Math.round(Number(reg.stock) || 0) : null; // saldo líquido (pode ser negativo)
+      let reposicao = false, semEstoque = false, deficit = 0;
       if (temEstoque) {
-        deficit = Math.max(0, remaining - stock);
-        reposicao = remaining > 0 && deficit === 0;   // estoque cobre os pedidos → reposição
-        semEstoque = remaining > 0 && stock === 0;    // cadastrado, mas zerado → urgente
+        if (stock < 0) { semEstoque = true; deficit = -stock; }  // backorder → urgente
+        else { reposicao = remaining > 0; }                       // ainda há saldo → reposição
       }
-      // Só vira reposição (baixa) quando o estoque cobre. Senão, prioridade pelo valor (como antes).
+      // Reposição vira baixa; sem saldo (backorder), prioridade pelo valor.
       const priority = reposicao ? 'Baixa' : filaPriority(it.price);
       return {
         productName: it.productName, sku: it.sku, quantity, printed, stock,
