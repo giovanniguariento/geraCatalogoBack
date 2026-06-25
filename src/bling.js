@@ -684,11 +684,11 @@ function filaList(map, estoque = {}) {
       const stock = temEstoque ? Math.round(Number(reg.stock) || 0) : null; // saldo líquido (pode ser negativo)
       let reposicao = false, semEstoque = false, deficit = 0;
       if (temEstoque) {
-        if (stock < 0) { semEstoque = true; deficit = -stock; }  // backorder → urgente
-        else { reposicao = remaining > 0; }                       // ainda há saldo → reposição
+        if (stock >= 0) { reposicao = true; }                              // tem saldo → reposição (mesmo com faltam 0)
+        else if (remaining > 0) { semEstoque = true; deficit = -stock; }   // backorder com pedido pendente
       }
-      // Reposição vira baixa; sem saldo (backorder), prioridade pelo valor.
-      const priority = reposicao ? 'Baixa' : filaPriority(it.price);
+      // Nada pendente (já impresso) ou com saldo → baixa. Sem saldo e pendente → pelo valor.
+      const priority = (remaining === 0 || reposicao) ? 'Baixa' : filaPriority(it.price);
       return {
         productName: it.productName, sku: it.sku, quantity, printed, stock,
         remaining, deficit, reposicao, semEstoque, temEstoque,
@@ -697,7 +697,9 @@ function filaList(map, estoque = {}) {
       };
     })
     .sort((a, b) => {
-      if (a.reposicao !== b.reposicao) return a.reposicao ? 1 : -1;
+      const aDone = a.reposicao || a.remaining === 0;
+      const bDone = b.reposicao || b.remaining === 0;
+      if (aDone !== bDone) return aDone ? 1 : -1;
       return (Number(b.price) || 0) - (Number(a.price) || 0);
     });
 }
