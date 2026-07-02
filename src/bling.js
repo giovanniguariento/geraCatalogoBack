@@ -791,6 +791,14 @@ export async function removeFilaItem(sku) {
   const queue = await readFila();
   const key = Object.keys(queue).find((k) => k === sku || k.trim() === String(sku).trim());
   if (key === undefined) throw new Error('SKU não encontrado na fila');
+  const item = queue[key];
+  // marca os pedidos como resolvidos: não voltam no próximo sync (só uma venda nova traz de volta)
+  const processed = await readProcessed();
+  for (const id of getOrderIds(item)) processed.add(id);
+  await writeProcessed(processed);
+  // mantém a baixa de estoque (unidades consideradas consumidas): zera o "committed" sem devolver o saldo
+  const est = await readEstoque();
+  if (est[key]) { est[key].committed = 0; est[key].updatedAt = new Date().toISOString(); await writeEstoque(est); }
   delete queue[key];
   await writeFila(queue);
   return filaResponse(queue);

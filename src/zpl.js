@@ -69,24 +69,25 @@ export async function convertZplToPdf({ zpl, dpmm = 8, width = 4, height = 6, ro
 
   const base = `${LABELARY_BASE}/v1/printers/${dpmm}dpmm/labels/${width}x${height}/`;
 
-  // 1) Tenta tudo numa requisição só (sem índice => PDF com TODAS as etiquetas).
-  //    Resolve o caso comum sem precisar do pdf-lib.
-  try {
+  // Até 50: a Labelary resolve numa requisição só (PDF com todas as etiquetas).
+  if (labels.length <= batchSize) {
     const pdf = await renderBatch(base, labels.join(''), rotation);
     return { pdf, labels: labels.length };
-  } catch (e) {
-    if (labels.length <= batchSize) throw e; // erro real, não é tamanho
   }
 
-  // 2) Lote grande demais p/ uma requisição: renderiza em blocos e junta (pdf-lib tardio)
-  const { PDFDocument } = await import('pdf-lib');
+  // Mais de 50: a Labelary limita a 50 por requisição (HTTP 413). Então quebramos
+  // em lotes de 50 e juntamos os PDFs com o pdf-lib.
+  let PDFDocument;
+  try { ({ PDFDocument } = await import('pdf-lib')); }
+  catch { throw new Error(`Para gerar mais de ${batchSize} etiquetas o servidor precisa do pacote "pdf-lib". Rode "npm install" no backend e publique de novo.`); }
+
   const out = await PDFDocument.create();
   for (let i = 0; i < labels.length; i += batchSize) {
     const buf = await renderBatch(base, labels.slice(i, i + batchSize).join(''), rotation);
     const doc = await PDFDocument.load(buf);
     const pages = await out.copyPages(doc, doc.getPageIndices());
     pages.forEach((p) => out.addPage(p));
-    if (i + batchSize < labels.length) await sleep(350);
+    if (i + batchSize < labels.length) await sleep(350); // respeita o limite de 5 req/s
   }
   return { pdf: Buffer.from(await out.save()), labels: labels.length };
 }
