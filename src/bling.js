@@ -1030,3 +1030,133 @@ export async function getProductDetail(id) {
     image,
   };
 }
+
+// ======================= ESTOQUE DE FILAMENTOS =======================
+// Integração com o Bling v3: lê o saldo atual e grava entradas/balanços.
+// No Bling v3 o estoque é por depósito, então todo lançamento aponta um depósito.
+
+// Envia dados ao Bling (POST/PUT/PATCH), com refresh de token e retry de 429.
+async function blingSend(path, method, body) {
+  let at = await getAccessToken();
+  if (!at) return { ok: false, status: 0, data: null, error: 'Bling não conectado' };
+  const doFetch = async (token) => {
+    await paceGate();
+    return fetch(API_URL + path, {
+      method,
+      headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: body != null ? JSON.stringify(body) : undefined,
+    });
+  };
+  try {
+    let res = await doFetch(at);
+    if (res.status === 401) {
+      const t = await loadTokens();
+      if (t && t.refresh_token) {
+        try { const nt = await refreshTokens(t.refresh_token); if (nt && nt.access_token) { at = nt.access_token; res = await doFetch(at); } }
+        catch (e) { console.error('[bling] refresh após 401 falhou:', e.message); }
+      }
+    }
+    let tentativas = 0;
+    while (res.status === 429 && tentativas < 4) { await sleep(1200); res = await doFetch(at); tentativas++; }
+    let data = null;
+    try { data = await res.json(); } catch {}
+    if (!res.ok) {
+      const msg = (data && data.error && (data.error.description || data.error.message))
+        || (data && Array.isArray(data.errors) && data.errors[0] && (data.errors[0].message || data.errors[0].msg))
+        || `Bling respondeu ${res.status}`;
+      return { ok: false, status: res.status, data, error: msg };
+    }
+    return { ok: true, status: res.status, data };
+  } catch (e) { return { ok: false, status: 0, data: null, error: e.message }; }
+}
+
+// ---- Depósitos ----
+export async function listDepositos() {
+  const j = await blingGet('/depositos');
+  const arr = (j && j.data) || [];
+  return arr.map((d) => ({ id: d.id, descricao: d.descricao || '', padrao: !!d.padrao, situacao: d.situacao }));
+}
+
+const FILAMENTO_DEP_KEY = 'filamento_deposito';
+export async function getDefaultDepositoId() {
+  const saved = await getConfig(FILAMENTO_DEP_KEY);
+  if (saved) return Number(saved);
+  const deps = await listDepositos();
+  if (!deps.length) return null;
+  const chosen = deps.find((d) => d.padrao) || deps[0];
+  await setConfig(FILAMENTO_DEP_KEY, String(chosen.id));
+  return chosen.id;
+}
+export async function setDepositoId(id) { await setConfig(FILAMENTO_DEP_KEY, String(Number(id))); return Number(id); }
+
+// ---- Lista de filamentos (curada no app) ----
+const FILAMENTO_KEY = 'filamento_lista';
+async function readFilamentos() { const raw = await getConfig(FILAMENTO_KEY); try { return raw ? JSON.parse(raw) : []; } catch { return []; } }
+async function writeFilamentos(list) { await setConfig(FILAMENTO_KEY, JSON.stringify(list)); }
+
+export async function addFilamento(id) {
+  id = Number(id);
+  if (!id) throw new Error('Produto inválido');
+  const list = await readFilamentos();
+  if (list.some((f) => f.id === id)) return filamentosComSaldo();
+  const d = await getProductDetail(id);
+  if (!d) throw new Error('Produto não encontrado no Bling');
+  list.push({ id, sku: d.codigo || '', nome: d.nome || '', image: d.image || '' });
+  await writeFilamentos(list);
+  return filamentosComSaldo();
+}
+
+export async function removeFilamento(id) {
+  id = Number(id);
+  const list = (await readFilamentos()).filter((f) => f.id !== id);
+  await writeFilamentos(list);
+  return filamentosComSaldo();
+}
+
+// Lê o saldo atual de vários produtos de uma vez.
+async function readSaldos(ids) {
+  const map = {};
+  if (!ids.length) return map;
+  const qs = ids.map((id) => 'idsProdutos[]=' + encodeURIComponent(id)).join('&');
+  const j = await blingGet('/estoques/saldos?' + qs);
+  const arr = (j && j.data) || [];
+  for (const row of arr) {
+    const pid = row && row.produto && row.produto.id;
+    if (pid == null) continue;
+    const saldo = row.saldoFisicoTotal != null ? row.saldoFisicoTotal
+      : row.saldoVirtualTotal != null ? row.saldoVirtualTotal
+      : Array.isArray(row.depositos) ? row.depositos.reduce((s, d) => s + (Number(d.saldoFisico) || 0), 0)
+      : null;
+    map[pid] = saldo != null ? Number(saldo) : null;
+  }
+  return map;
+}
+
+export async function filamentosComSaldo() {
+  const list = await readFilamentos();
+  const saldos = await readSaldos(list.map((f) => f.id));
+  return list.map((f) => ({ ...f, saldo: (f.id in saldos) ? saldos[f.id] : null }));
+}
+
+// ---- Lançamento de estoque (entrada / balanço) ----
+async function lancarEstoque({ id, operacao, quantidade, custo, obs }) {
+  id = Number(id);
+  quantidade = Number(quantidade);
+  if (!id) throw new Error('Produto inválido');
+  if (!(quantidade >= 0)) throw new Error('Quantidade inválida');
+  const depId = await getDefaultDepositoId();
+  if (!depId) throw new Error('Nenhum depósito encontrado no Bling');
+  const body = {
+    deposito: { id: depId },
+    operacao, // 'E' = entrada (soma) · 'B' = balanço (define o total)
+    produto: { id },
+    quantidade,
+    observacoes: obs || (operacao === 'B' ? 'Balanço via app' : 'Entrada via app'),
+  };
+  if (custo != null && custo !== '' && Number(custo) > 0) body.custo = Number(custo);
+  const r = await blingSend('/estoques', 'POST', body);
+  if (!r.ok) throw new Error(r.error || 'Falha ao lançar no Bling');
+  return filamentosComSaldo();
+}
+export async function entradaFilamento({ id, quantidade, custo, obs }) { return lancarEstoque({ id, operacao: 'E', quantidade, custo, obs }); }
+export async function balancoFilamento({ id, quantidade, obs }) { return lancarEstoque({ id, operacao: 'B', quantidade, obs }); }
