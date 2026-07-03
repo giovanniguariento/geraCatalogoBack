@@ -199,26 +199,26 @@ dataRouter.post('/deposito', async (req, res) => {
 });
 
 dataRouter.get('/filamentos', async (_req, res) => {
-  try { res.json({ filamentos: await filamentosComSaldo() }); }
+  try { res.json(await filamentosComSaldo()); }
   catch (e) { res.status(400).json({ error: String(e.message || e) }); }
 });
 
 dataRouter.post('/filamentos', async (req, res) => {
-  try { res.json({ filamentos: await addFilamento((req.body || {}).id) }); }
+  try { res.json(await addFilamento((req.body || {}).id)); }
   catch (e) { res.status(400).json({ error: String(e.message || e) }); }
 });
 
 dataRouter.post('/filamentos/remover', async (req, res) => {
-  try { res.json({ filamentos: await removeFilamento((req.body || {}).id) }); }
+  try { res.json(await removeFilamento((req.body || {}).id)); }
   catch (e) { res.status(400).json({ error: String(e.message || e) }); }
 });
 
 dataRouter.post('/filamentos/entrada', async (req, res) => {
-  try { res.json({ filamentos: await entradaFilamento(req.body || {}) }); }
+  try { res.json(await entradaFilamento(req.body || {})); }
   catch (e) { res.status(400).json({ error: String(e.message || e) }); }
 });
 
 dataRouter.post('/filamentos/balanco', async (req, res) => {
-  try { res.json({ filamentos: await balancoFilamento(req.body || {}) }); }
+  try { res.json(await balancoFilamento(req.body || {})); }
   catch (e) { res.status(400).json({ error: String(e.message || e) }); }
 });

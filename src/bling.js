@@ -1113,29 +1113,58 @@ export async function removeFilamento(id) {
   return filamentosComSaldo();
 }
 
-// Lê o saldo atual de vários produtos de uma vez.
+// GET ao Bling que devolve status e corpo (pra diagnosticar, sem engolir o erro).
+async function blingGetRaw(path) {
+  let at = await getAccessToken();
+  if (!at) return { ok: false, status: 0, data: null };
+  const doFetch = async (token) => { await paceGate(); return fetch(API_URL + path, { headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' } }); };
+  try {
+    let res = await doFetch(at);
+    if (res.status === 401) {
+      const t = await loadTokens();
+      if (t && t.refresh_token) { try { const nt = await refreshTokens(t.refresh_token); if (nt && nt.access_token) { at = nt.access_token; res = await doFetch(at); } } catch {} }
+    }
+    let tent = 0;
+    while (res.status === 429 && tent < 4) { await sleep(1200); res = await doFetch(at); tent++; }
+    let data = null; try { data = await res.json(); } catch {}
+    return { ok: res.ok, status: res.status, data };
+  } catch (e) { return { ok: false, status: 0, data: null, error: e.message }; }
+}
+
+// Lê o saldo atual de vários produtos de uma vez. Casa o produto de forma flexível.
 async function readSaldos(ids) {
-  const map = {};
-  if (!ids.length) return map;
+  const map = {}; let status = 200, sample = null;
+  if (!ids.length) return { map, status, sample };
   const qs = ids.map((id) => 'idsProdutos[]=' + encodeURIComponent(id)).join('&');
-  const j = await blingGet('/estoques/saldos?' + qs);
-  const arr = (j && j.data) || [];
+  const r = await blingGetRaw('/estoques/saldos?' + qs);
+  status = r.status;
+  const arr = (r.data && r.data.data) || [];
+  if (arr.length) sample = arr[0];
   for (const row of arr) {
-    const pid = row && row.produto && row.produto.id;
-    if (pid == null) continue;
+    const pid = (row.produto && row.produto.id) ?? row.idProduto ?? row.produtoId ?? row.id;
     const saldo = row.saldoFisicoTotal != null ? row.saldoFisicoTotal
       : row.saldoVirtualTotal != null ? row.saldoVirtualTotal
       : Array.isArray(row.depositos) ? row.depositos.reduce((s, d) => s + (Number(d.saldoFisico) || 0), 0)
       : null;
-    map[pid] = saldo != null ? Number(saldo) : null;
+    if (pid != null) map[pid] = saldo != null ? Number(saldo) : null;
   }
-  return map;
+  // Se pedimos 1 produto e não deu pra casar pelo id, associa direto ao único resultado.
+  if (ids.length === 1 && !(ids[0] in map) && arr.length === 1) {
+    const row = arr[0];
+    const s = row.saldoFisicoTotal ?? row.saldoVirtualTotal ?? null;
+    if (s != null) map[ids[0]] = Number(s);
+  }
+  return { map, status, sample };
 }
 
 export async function filamentosComSaldo() {
   const list = await readFilamentos();
-  const saldos = await readSaldos(list.map((f) => f.id));
-  return list.map((f) => ({ ...f, saldo: (f.id in saldos) ? saldos[f.id] : null }));
+  const { map, status, sample } = await readSaldos(list.map((f) => f.id));
+  return {
+    filamentos: list.map((f) => ({ ...f, saldo: (f.id in map) ? map[f.id] : null })),
+    saldoStatus: status,
+    saldoSample: sample || null,
+  };
 }
 
 // ---- Lançamento de estoque (entrada / balanço) ----

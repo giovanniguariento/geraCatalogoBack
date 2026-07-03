@@ -36,7 +36,7 @@ app.use('/api', (req, res, next) => {
 });
 
 app.get('/', (_req, res) => res.json({ name: 'Boreal3D Catálogos API', status: 'ok' }));
-app.get('/health', (_req, res) => res.json({ ok: true, build: 'filamentos-v1', ts: '2026-06-21' }));
+app.get('/health', (_req, res) => res.json({ ok: true, build: 'filamentos-saldo-fix', ts: '2026-06-21b' }));
 
 // OAuth do Bling é visitado no navegador (Bling redireciona pra cá),
 // então fica FORA de /api e não passa pela trava de chave de API.
