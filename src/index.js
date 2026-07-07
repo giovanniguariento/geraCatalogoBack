@@ -4,6 +4,7 @@ import { initDb } from './db.js';
 import catalogs from './routes/catalogs.js';
 import pages from './routes/pages.js';
 import { oauthRouter, dataRouter as blingData } from './routes/bling.js';
+import { cnabRouter } from './routes/cnab.js';
 import zplRouter from './routes/zpl.js';
 import { startFilaAutoSync } from './bling.js';
 
@@ -36,7 +37,7 @@ app.use('/api', (req, res, next) => {
 });
 
 app.get('/', (_req, res) => res.json({ name: 'Boreal3D Catálogos API', status: 'ok' }));
-app.get('/health', (_req, res) => res.json({ ok: true, build: 'filamentos-saldo-fix', ts: '2026-06-21b' }));
+app.get('/health', (_req, res) => res.json({ ok: true, build: 'cnab-itau-gnre', ts: '2026-06-22b' }));
 
 // OAuth do Bling é visitado no navegador (Bling redireciona pra cá),
 // então fica FORA de /api e não passa pela trava de chave de API.
@@ -45,6 +46,7 @@ app.use('/bling', oauthRouter);
 app.use('/api/catalogs', catalogs);
 app.use('/api/bling', blingData); // status + busca de produtos (usado pelo frontend)
 app.use('/api/zpl', zplRouter); // conversor ZPL -> PDF
+app.use('/api/cnab', cnabRouter); // guias -> CNAB 240 Itaú
 app.use('/api', pages); // /api/pages/:id
 
 app.use((err, _req, res, _next) => {
