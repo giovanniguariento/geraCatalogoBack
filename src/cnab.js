@@ -9,7 +9,7 @@ const PAGADOR_KEY = 'itau_pagador';
 // Constantes que o validador do Itaú pode pedir ajuste (ficam aqui pra facilitar):
 const VERSAO_LAYOUT_ARQUIVO = '080';
 const VERSAO_LAYOUT_LOTE = '040';
-const TIPO_SERVICO = '98'; // pagamentos diversos
+const TIPO_SERVICO = '22'; // Pagamento de Tributos/Contas (compatível com formas 13 e 91)
 // Forma de lançamento por tipo de guia (2º dígito do código de barras):
 //  segmentos 2/3/4 = concessionárias -> 13 ; demais = tributos com código de barras -> 91
 function formaPorSegmento(seg) { return ['2', '3', '4'].includes(String(seg)) ? '13' : '91'; }
