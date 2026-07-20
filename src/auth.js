@@ -7,7 +7,7 @@ const JWT_SECRET = process.env.JWT_SECRET || ('dev-' + Math.random().toString(36
 if (!process.env.JWT_SECRET) console.warn('[auth] JWT_SECRET não definido — defina em produção (senão os logins caem a cada restart).');
 
 // Telas que podem ser liberadas por usuário. Admin acessa tudo + a tela de usuários.
-export const PERMISSOES = ['catalogos', 'fila', 'filamentos', 'zpl', 'cnab', 'relatorios'];
+export const PERMISSOES = ['catalogos', 'fila', 'filamentos', 'zpl', 'cnab', 'relatorios', 'calculadora'];
 
 function mapUser(r) {
   return { id: r.id, email: r.email, nome: r.nome, role: r.role, permissoes: r.permissoes || [], ativo: r.ativo };
