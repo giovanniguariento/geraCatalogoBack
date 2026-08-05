@@ -51,7 +51,66 @@ function desenhaEtiqueta(page, x0, largura, item, img, fontBold, fontReg) {
   page.drawText(num, { x: cx - numW / 2, y: 2.2 * MM, size: numSize, font: fontReg });
 }
 
-// itens: [{ gtin, nome }]. Uma folha (página) por item, com 2 etiquetas iguais.
+// ---------------- modo texto (10x5 e 10x15): texto livre, centralizado e enquadrado ----------------
+const TAMANHOS = { '10x5': [100, 50], '10x15': [100, 150] };
+
+function quebra(font, texto, size, maxW) {
+  const linhas = [];
+  for (const paragrafo of String(texto).split('\n')) {
+    const palavras = paragrafo.split(/\s+/).filter(Boolean);
+    let cur = '';
+    for (const w of palavras) {
+      const t = cur ? cur + ' ' + w : w;
+      if (font.widthOfTextAtSize(t, size) <= maxW || !cur) cur = t;
+      else { linhas.push(cur); cur = w; }
+    }
+    linhas.push(cur);
+  }
+  return linhas.length ? linhas : [''];
+}
+
+function ajusta(font, texto, maxW, maxH, maxSize = 220) {
+  for (let s = maxSize; s >= 6; s -= 1) {
+    const linhas = quebra(font, texto, s, maxW);
+    const lh = s * 1.18;
+    const alturaOk = linhas.length * lh <= maxH;
+    const larguraOk = linhas.every((l) => font.widthOfTextAtSize(l, s) <= maxW);
+    if (alturaOk && larguraOk) return { size: s, linhas, lh };
+  }
+  return { size: 6, linhas: quebra(font, texto, 6, maxW), lh: 7 };
+}
+
+function desenhaTexto(page, texto, font) {
+  const W = page.getWidth(), H = page.getHeight();
+  const m = 4 * MM;
+  page.drawRectangle({ x: m, y: m, width: W - 2 * m, height: H - 2 * m, borderColor: rgb(0, 0, 0), borderWidth: 1.2 * MM });
+  const pad = 4 * MM;
+  const innerW = W - 2 * m - 2 * pad, innerH = H - 2 * m - 2 * pad;
+  const { size, linhas, lh } = ajusta(font, texto.trim(), innerW, innerH);
+  const asc = font.heightAtSize(size, { descender: false });
+  const desc = font.heightAtSize(size) - asc;
+  const blocoH = (linhas.length - 1) * lh + font.heightAtSize(size);
+  const topo = (H + blocoH) / 2 + desc / 2; // empurra pra cima p/ centrar visualmente
+  linhas.forEach((ln, i) => {
+    const w = font.widthOfTextAtSize(ln, size);
+    const y = topo - asc - i * lh;
+    page.drawText(ln, { x: (W - w) / 2, y, size, font, color: rgb(0, 0, 0) });
+  });
+}
+
+export async function gerarEtiquetasTexto(itens, tamanho) {
+  const dims = TAMANHOS[tamanho];
+  if (!dims) throw new Error('Tamanho inválido para etiqueta de texto.');
+  const lista = (itens || []).map((i) => String(i.texto ?? i ?? '').trim()).filter(Boolean);
+  if (!lista.length) throw new Error('Escreva ao menos um texto.');
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.HelveticaBold);
+  for (const texto of lista) {
+    const page = doc.addPage([dims[0] * MM, dims[1] * MM]);
+    desenhaTexto(page, texto, font);
+  }
+  return Buffer.from(await doc.save());
+}
 export async function gerarEtiquetasPdf(itens) {
   const lista = (itens || []).map((i) => ({ gtin: onlyDigits(i.gtin), nome: i.nome })).filter((i) => i.gtin);
   if (!lista.length) throw new Error('Informe pelo menos um produto com GTIN.');
