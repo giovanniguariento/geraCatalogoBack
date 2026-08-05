@@ -6,8 +6,17 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 const MM = 2.83465; // mm -> pt
 const onlyDigits = (s) => String(s == null ? '' : s).replace(/\D/g, '');
 
-async function barcodePng(gtin) {
-  return bwipjs.toBuffer({ bcid: 'itf14', text: gtin, scale: 4, height: 8, includetext: false, paddingwidth: 0, paddingheight: 0 });
+async function barcodePng(gtin14) {
+  // Interleaved 2 of 5 (mesmo padrão do GTIN-14), porém SEM as bearer bars (moldura).
+  return bwipjs.toBuffer({ bcid: 'interleaved2of5', text: gtin14, scale: 4, height: 11, includetext: false, paddingwidth: 0, paddingheight: 0 });
+}
+
+// Normaliza o GTIN para 14 dígitos (GTIN-13 vira GTIN-14 com zero à esquerda).
+function normalizaGtin(g) {
+  const d = onlyDigits(g);
+  if (d.length === 14) return d;
+  if (d.length === 13) return '0' + d;
+  return d;
 }
 
 function ajustaFonte(font, texto, maxW, ini = 12, min = 6) {
@@ -55,14 +64,16 @@ export async function gerarEtiquetasPdf(itens) {
     if (!(item.gtin.length === 13 || item.gtin.length === 14)) {
       throw new Error(`GTIN inválido "${item.gtin}" (precisa ter 13 ou 14 dígitos).`);
     }
+    const gtin14 = normalizaGtin(item.gtin);
     let png;
-    try { png = await barcodePng(item.gtin); }
+    try { png = await barcodePng(gtin14); }
     catch (e) { throw new Error(`Não foi possível gerar o código de barras de "${item.gtin}": ${e.message}`); }
     const img = await doc.embedPng(png);
 
     const page = doc.addPage([100 * MM, 30 * MM]);
-    desenhaEtiqueta(page, 0, 50 * MM, item, img, fontBold, fontReg);       // etiqueta esquerda
-    desenhaEtiqueta(page, 50 * MM, 50 * MM, item, img, fontBold, fontReg); // etiqueta direita (igual)
+    const it2 = { ...item, gtin: gtin14 };
+    desenhaEtiqueta(page, 0, 50 * MM, it2, img, fontBold, fontReg);       // etiqueta esquerda
+    desenhaEtiqueta(page, 50 * MM, 50 * MM, it2, img, fontBold, fontReg); // etiqueta direita (igual)
   }
 
   return Buffer.from(await doc.save());
