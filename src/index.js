@@ -7,6 +7,7 @@ import { oauthRouter, dataRouter as blingData } from './routes/bling.js';
 import { cnabRouter } from './routes/cnab.js';
 import { authRouter } from './routes/auth.js';
 import { calcRouter } from './routes/calc.js';
+import { etiquetasRouter } from './routes/etiquetas.js';
 import { initAuth, requireAuth, requirePerm } from './auth.js';
 import zplRouter from './routes/zpl.js';
 import { startFilaAutoSync } from './bling.js';
@@ -40,7 +41,7 @@ app.use('/api', (req, res, next) => {
 });
 
 app.get('/', (_req, res) => res.json({ name: 'Boreal3D Catálogos API', status: 'ok' }));
-app.get('/health', (_req, res) => res.json({ ok: true, build: 'calc-preco-v1', ts: '2026-06-25' }));
+app.get('/health', (_req, res) => res.json({ ok: true, build: 'etiquetas-v1', ts: '2026-06-26' }));
 
 // OAuth do Bling é visitado no navegador (Bling redireciona pra cá),
 // então fica FORA de /api e não passa pela trava de chave de API.
@@ -63,6 +64,7 @@ app.use('/api/bling', (req, res, next) => {
 app.use('/api/zpl', requirePerm('zpl'), zplRouter); // conversor ZPL -> PDF
 app.use('/api/cnab', requirePerm('cnab'), cnabRouter); // guias -> CNAB 240 Itaú
 app.use('/api/calc', requirePerm('calculadora'), calcRouter); // cálculo de preço/margem
+app.use('/api/etiquetas', requirePerm('etiquetas'), etiquetasRouter); // gerador de etiquetas
 app.use('/api', requirePerm('catalogos'), pages); // /api/pages/:id (parte dos catálogos)
 
 app.use((err, _req, res, _next) => {
