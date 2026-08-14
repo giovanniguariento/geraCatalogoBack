@@ -1185,7 +1185,8 @@ async function lancarEstoque({ id, operacao, quantidade, custo, obs }) {
   if (custo != null && custo !== '' && Number(custo) > 0) body.custo = Number(custo);
   const r = await blingSend('/estoques', 'POST', body);
   if (!r.ok) throw new Error(r.error || 'Falha ao lançar no Bling');
-  return filamentosComSaldo();
+  // Retorna leve (sem reler o saldo de todos os filamentos) para liberar o próximo lançamento na hora.
+  return { ok: true, id, operacao, quantidade };
 }
 export async function entradaFilamento({ id, quantidade, custo, obs }) { return lancarEstoque({ id, operacao: 'E', quantidade, custo, obs }); }
 export async function balancoFilamento({ id, quantidade, obs }) { return lancarEstoque({ id, operacao: 'B', quantidade, obs }); }
