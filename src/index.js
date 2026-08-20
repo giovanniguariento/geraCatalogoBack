@@ -8,6 +8,8 @@ import { cnabRouter } from './routes/cnab.js';
 import { authRouter } from './routes/auth.js';
 import { calcRouter } from './routes/calc.js';
 import { etiquetasRouter } from './routes/etiquetas.js';
+import { clientesRouter } from './routes/clientes.js';
+import { initClientes } from './clientes.js';
 import { initAuth, requireAuth, requirePerm } from './auth.js';
 import zplRouter from './routes/zpl.js';
 import { startFilaAutoSync } from './bling.js';
@@ -41,7 +43,7 @@ app.use('/api', (req, res, next) => {
 });
 
 app.get('/', (_req, res) => res.json({ name: 'Boreal3D Catálogos API', status: 'ok' }));
-app.get('/health', (_req, res) => res.json({ ok: true, build: 'filamento-lancamento-rapido', ts: '2026-06-27' }));
+app.get('/health', (_req, res) => res.json({ ok: true, build: 'saldo-clientes-v1', ts: '2026-06-28' }));
 
 // OAuth do Bling é visitado no navegador (Bling redireciona pra cá),
 // então fica FORA de /api e não passa pela trava de chave de API.
@@ -65,6 +67,7 @@ app.use('/api/zpl', requirePerm('zpl'), zplRouter); // conversor ZPL -> PDF
 app.use('/api/cnab', requirePerm('cnab'), cnabRouter); // guias -> CNAB 240 Itaú
 app.use('/api/calc', requirePerm('calculadora'), calcRouter); // cálculo de preço/margem
 app.use('/api/etiquetas', requirePerm('etiquetas'), etiquetasRouter); // gerador de etiquetas
+app.use('/api/clientes', requirePerm('clientes'), clientesRouter); // saldo de clientes (pré-compra)
 app.use('/api', requirePerm('catalogos'), pages); // /api/pages/:id (parte dos catálogos)
 
 app.use((err, _req, res, _next) => {
@@ -74,6 +77,7 @@ app.use((err, _req, res, _next) => {
 
 initDb()
   .then(() => initAuth())
+  .then(() => initClientes())
   .then(() => app.listen(PORT, () => {
     console.log(`[api] rodando na porta ${PORT}`);
     startFilaAutoSync();
