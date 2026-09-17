@@ -433,7 +433,29 @@ const FILA_KEY = 'fila_queue';            // mapa { sku: item }
 const FILA_PROCESSED_KEY = 'fila_processed'; // array de pedidos já concluídos
 const FILA_ALTA = Number(process.env.FILA_PRECO_ALTA || 49);
 const FILA_MEDIA = Number(process.env.FILA_PRECO_MEDIA || 30);
-const FILA_SITUACAO = process.env.FILA_ID_SITUACAO || '6'; // 6 = Em aberto
+const FILA_SITUACAO = process.env.FILA_ID_SITUACAO || '6'; // 6 = Em aberto (padrão)
+const FILA_SIT_KEY = 'fila_situacoes';
+// Lista de situações aceitas na fila (config no app; default '6' ou env). Ex.: ['6','12345'].
+export async function getFilaSituacoes() {
+  const raw = await getConfig(FILA_SIT_KEY);
+  const ids = (raw ? String(raw) : FILA_SITUACAO).split(',').map((s) => s.trim()).filter(Boolean);
+  return ids.length ? ids : ['6'];
+}
+export async function setFilaSituacoes(ids) {
+  const list = (Array.isArray(ids) ? ids : String(ids || '').split(',')).map((s) => String(s).trim()).filter(Boolean);
+  await setConfig(FILA_SIT_KEY, list.join(','));
+  return list.length ? list : ['6'];
+}
+// Lista as situações do módulo de vendas do Bling (id + nome), pra você escolher quais entram na fila.
+export async function listSituacoesVendas() {
+  const mods = await blingGet('/situacoes/modulos');
+  const arr = (mods && mods.data) || [];
+  const vendas = arr.find((m) => /venda|pedido/i.test(m.descricao || m.nome || '')) || arr[0];
+  if (!vendas) return [];
+  const j = await blingGet('/situacoes/modulos/' + vendas.id);
+  const sits = (j && j.data) || [];
+  return sits.map((s) => ({ id: s.id, nome: s.nome || s.descricao || String(s.id) }));
+}
 const FILA_DIAS_JANELA = Number(process.env.FILA_DIAS_JANELA || 3); // janela de data p/ não-Meli
 
 function filaPriority(price) {
@@ -559,15 +581,18 @@ function getOrderIds(item) {
 // Lista pedidos em aberto (situação 6). Não-Meli: janela dos últimos N dias.
 // Meli: todos em aberto (sem filtro de data). Junta sem duplicar.
 async function listOpenOrders() {
+  const situacoes = await getFilaSituacoes();
+  const permitidas = new Set(situacoes.map(String));
   const fmt = (d) => d.toISOString().split('T')[0];
   const hoje = new Date();
   const ini = new Date(hoje); ini.setDate(hoje.getDate() - FILA_DIAS_JANELA);
   const amanha = new Date(hoje); amanha.setDate(hoje.getDate() + 1);
 
-  async function pages(params) {
+  async function pages(extra) {
     const out = [];
     for (let pagina = 1; pagina <= 50; pagina++) {
-      const p = new URLSearchParams({ ...params, pagina: String(pagina), limite: '100' });
+      const p = new URLSearchParams({ ...extra, pagina: String(pagina), limite: '100' });
+      for (const s of situacoes) p.append('idsSituacoes[]', String(s));
       const j = await blingGet('/pedidos/vendas?' + p.toString());
       const arr = j && Array.isArray(j.data) ? j.data : [];
       if (!arr.length) break;
@@ -577,15 +602,15 @@ async function listOpenOrders() {
     return out;
   }
 
-  const datados = (await pages({ idsSituacoes: FILA_SITUACAO, dataInicial: fmt(ini), dataFinal: fmt(amanha) }))
+  const datados = (await pages({ dataInicial: fmt(ini), dataFinal: fmt(amanha) }))
     .filter((o) => !isMercadoLivre(o.numeroLoja));
-  const meli = (await pages({ idsSituacoes: FILA_SITUACAO }))
+  const meli = (await pages({}))
     .filter((o) => isMercadoLivre(o.numeroLoja));
 
   const seen = new Set();
   const merged = [];
   for (const o of [...meli, ...datados]) {
-    if (FILA_SITUACAO && o.situacao && String(o.situacao.id) !== String(FILA_SITUACAO)) continue;
+    if (permitidas.size && o.situacao && !permitidas.has(String(o.situacao.id))) continue;
     if (!seen.has(o.id)) { seen.add(o.id); merged.push(o); }
   }
   return merged;

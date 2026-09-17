@@ -7,6 +7,7 @@ import {
   getEstoque, setEstoque, removeEstoque,
   listDepositos, getDefaultDepositoId, setDepositoId,
   filamentosComSaldo, addFilamento, removeFilamento, entradaFilamento, balancoFilamento,
+  getFilaSituacoes, setFilaSituacoes, listSituacoesVendas,
 } from '../bling.js';
 
 // Páginas HTML simples (fallback quando não há frontend pra onde voltar)
@@ -179,6 +180,16 @@ dataRouter.post('/estoque/remover', async (req, res) => {
 dataRouter.post('/fila/remover', async (req, res) => {
   const { sku } = req.body || {};
   try { res.json({ fila: await removeFilaItem(sku) }); }
+  catch (e) { res.status(400).json({ error: String(e.message || e) }); }
+});
+
+dataRouter.get('/fila/situacoes', async (_req, res) => {
+  try { res.json({ selecionadas: await getFilaSituacoes(), disponiveis: await listSituacoesVendas() }); }
+  catch (e) { res.status(400).json({ error: String(e.message || e) }); }
+});
+
+dataRouter.post('/fila/situacoes', async (req, res) => {
+  try { res.json({ selecionadas: await setFilaSituacoes((req.body || {}).ids) }); }
   catch (e) { res.status(400).json({ error: String(e.message || e) }); }
 });
 
