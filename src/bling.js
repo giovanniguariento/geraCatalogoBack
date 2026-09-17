@@ -76,6 +76,7 @@ async function requestToken(bodyParams) {
       'Authorization': basicAuthHeader(),
       'Content-Type': 'application/x-www-form-urlencoded',
       'Accept': 'application/json',
+      'enable-jwt': '1', // exigido pelo Bling a partir de 15/10 (tokens JWT)
     },
     body: new URLSearchParams(bodyParams).toString(),
   });
