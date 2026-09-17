@@ -446,15 +446,38 @@ export async function setFilaSituacoes(ids) {
   await setConfig(FILA_SIT_KEY, list.join(','));
   return list.length ? list : ['6'];
 }
-// Lista as situações do módulo de vendas do Bling (id + nome), pra você escolher quais entram na fila.
+// Lista os status para a fila escolher. Deriva dos pedidos recentes (sempre funciona)
+// e enriquece com os nomes das situações do Bling quando disponível.
 export async function listSituacoesVendas() {
-  const mods = await blingGet('/situacoes/modulos');
-  const arr = (mods && mods.data) || [];
-  const vendas = arr.find((m) => /venda|pedido/i.test(m.descricao || m.nome || '')) || arr[0];
-  if (!vendas) return [];
-  const j = await blingGet('/situacoes/modulos/' + vendas.id);
-  const sits = (j && j.data) || [];
-  return sits.map((s) => ({ id: s.id, nome: s.nome || s.descricao || String(s.id) }));
+  const nomes = {};
+  try {
+    const mods = await blingGet('/situacoes/modulos');
+    for (const m of ((mods && mods.data) || [])) {
+      const j = await blingGet('/situacoes/modulos/' + m.id);
+      for (const s of ((j && j.data) || [])) nomes[String(s.id)] = s.nome || s.descricao || ('Status #' + s.id);
+    }
+  } catch {}
+
+  const counts = {};
+  try {
+    const fmt = (d) => d.toISOString().split('T')[0];
+    const hoje = new Date();
+    const ini = new Date(hoje); ini.setDate(hoje.getDate() - 20);
+    const amanha = new Date(hoje); amanha.setDate(hoje.getDate() + 1);
+    for (let pagina = 1; pagina <= 5; pagina++) {
+      const p = new URLSearchParams({ dataInicial: fmt(ini), dataFinal: fmt(amanha), pagina: String(pagina), limite: '100' });
+      const j = await blingGet('/pedidos/vendas?' + p.toString());
+      const rows = (j && j.data) || [];
+      if (!rows.length) break;
+      for (const o of rows) { const id = o.situacao && o.situacao.id; if (id != null) counts[String(id)] = (counts[String(id)] || 0) + 1; }
+      if (rows.length < 100) break;
+    }
+  } catch {}
+
+  const ids = new Set([...Object.keys(nomes), ...Object.keys(counts)]);
+  const lista = [...ids].map((id) => ({ id: Number(id), nome: nomes[id] || ('Status #' + id), recentes: counts[id] || 0 }));
+  lista.sort((a, b) => b.recentes - a.recentes);
+  return lista;
 }
 const FILA_DIAS_JANELA = Number(process.env.FILA_DIAS_JANELA || 3); // janela de data p/ não-Meli
 
